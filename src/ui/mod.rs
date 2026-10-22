@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Screen};
+use crate::app::{App, Focus, Screen};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let root = Layout::default()
@@ -24,7 +24,7 @@ fn draw_profiles(frame: &mut Frame, app: &mut App, area: Rect) {
 
     if app.profiles.is_empty() {
         let hint = Paragraph::new(
-            "no saved connections\n\nadd one :\n  pluto add <name> <host> <user> <password> <database>",
+            "no saved connections\n\nadd one (CLI stopgap for now):\n  pluto add <name> <host> <user> <password> <database>",
         )
         .block(Block::default().borders(Borders::ALL).title(" pluto "));
         frame.render_widget(hint, area);
@@ -49,50 +49,76 @@ fn draw_profiles(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.profile_list);
 }
 
-fn draw_main(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     let panes = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
 
-    let sidebar_inner = Block::default()
-        .borders(Borders::ALL)
-        .title(" tables ")
-        .border_style(Style::default().fg(Color::DarkGray));
+    app.sidebar_rect = panes[0];
+    app.main_rect = panes[1];
 
-    let content = if app.loading_tables {
-        Paragraph::new(" loading… ")
-    } else if app.schemas.is_empty() {
-        Paragraph::new(" no tables ")
+    let sidebar_border = if app.focus == Focus::Sidebar {
+        Color::Yellow
     } else {
-        let mut lines: Vec<Line> = Vec::new();
-        for schema in &app.schemas {
-            lines.push(Line::from(Span::styled(
-                format!("▸ {}", schema.name),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )));
-            for table in &schema.tables {
-                lines.push(Line::from(format!("    {}", table)));
-            }
-        }
-        Paragraph::new(lines)
+        Color::DarkGray
+    };
+    let main_border = if app.focus == Focus::Main {
+        Color::Yellow
+    } else {
+        Color::DarkGray
     };
 
-    frame.render_widget(content.block(sidebar_inner), panes[0]);
+    let mut items: Vec<ListItem> = Vec::new();
+    for (si, schema) in app.schemas.iter().enumerate() {
+        let expanded = app.sidebar.is_expanded(si);
+        let icon = if expanded { "▾" } else { "▸" };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("{icon} "), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                &schema.name,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+        ])));
+        if expanded {
+            for table in &schema.tables {
+                items.push(ListItem::new(format!("    {table}")));
+            }
+        }
+    }
 
-    frame.render_widget(
+    let sidebar = List::new(items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" tables ")
+                .border_style(Style::default().fg(sidebar_border)),
+        )
+        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(sidebar, panes[0], &mut app.sidebar.list);
+
+    let text = if app.loading_tables {
+        " loading… "
+    } else {
+        "select a table from the sidebar\n\nits data lands here in M4"
+    };
+    let main = Paragraph::new(text).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" main ")
-            .border_style(Style::default().fg(Color::DarkGray)),
-        panes[1],
+            .border_style(Style::default().fg(main_border)),
     );
+    frame.render_widget(main, panes[1]);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let hints = match app.screen {
         Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
-        Screen::Main => "q: quit",
+        Screen::Main => {
+            "Tab: panes  |  j/k/gg/G: move  |  Enter: open  |  h/l: fold  |  q: quit"
+        }
     };
     let status_color = if app.status.starts_with("connection failed")
         || app.status.starts_with("failed")

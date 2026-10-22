@@ -6,16 +6,18 @@ mod ui;
 use std::io::stdout;
 use std::time::Duration;
 
-use app::{App, Screen};
+use app::{App, Entry, Focus, Screen};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 
 fn main() -> anyhow::Result<()> {
+    // CLI stopgap: pluto add <name> <host> <user> <password> <database> [sslmode]
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "add") {
         return add_profile(&args);
@@ -93,14 +95,20 @@ fn handle_input(app: &mut App) -> anyhow::Result<()> {
     if !event::poll(Duration::from_millis(33))? {
         return Ok(());
     }
-    let Event::Key(key) = event::read()? else {
-        return Ok(());
-    };
-    if key.kind != KeyEventKind::Press {
-        return Ok(());
+    match event::read()? {
+        Event::Key(key) => handle_key(app, key),
+        Event::Mouse(mouse) => handle_mouse(app, mouse),
+        _ => {}
     }
+    Ok(())
+}
 
+fn handle_key(app: &mut App, key: event::KeyEvent) {
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
     match app.screen {
         Screen::Profiles => match key.code {
             KeyCode::Char('j') | KeyCode::Down => app.next_profile(),
@@ -114,8 +122,53 @@ fn handle_input(app: &mut App) -> anyhow::Result<()> {
         Screen::Main => match key.code {
             KeyCode::Char('q') => app.quit(),
             KeyCode::Char('c') if ctrl => app.quit(),
+            KeyCode::Tab => app.toggle_focus(),
+            _ if app.focus == Focus::Sidebar => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => app.sidebar.next(&app.schemas),
+                KeyCode::Char('k') | KeyCode::Up => app.sidebar.prev(&app.schemas),
+                KeyCode::Char('g') => app.sidebar.first(&app.schemas),
+                KeyCode::Char('G') => app.sidebar.last(&app.schemas),
+                KeyCode::Enter => match app.sidebar.selected_entry(&app.schemas) {
+                    Some(Entry::Schema(_)) => app.sidebar.toggle(&app.schemas),
+                    Some(Entry::Table(si, ti)) => app.select_table(si, ti),
+                    None => {}
+                },
+                KeyCode::Char('h') | KeyCode::Left => app.sidebar.collapse(&app.schemas),
+                KeyCode::Char('l') | KeyCode::Right => app.sidebar.expand(&app.schemas),
+                _ => {}
+            },
             _ => {}
         },
     }
-    Ok(())
+}
+
+fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    match mouse.kind {
+        MouseEventKind::ScrollDown if in_rect(mouse.column, mouse.row, app.sidebar_rect) => {
+            app.sidebar.next(&app.schemas)
+        }
+        MouseEventKind::ScrollUp if in_rect(mouse.column, mouse.row, app.sidebar_rect) => {
+            app.sidebar.prev(&app.schemas)
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if in_rect(mouse.column, mouse.row, app.sidebar_rect) {
+                app.focus = Focus::Sidebar;
+                // +1 skips the top border row; offset accounts for scrolled-out rows
+                let row = mouse.row.saturating_sub(app.sidebar_rect.y + 1) as usize;
+                let idx = app.sidebar.list.offset() + row;
+                if idx < app.sidebar.visible_len(&app.schemas) {
+                    app.sidebar.list.select(Some(idx));
+                }
+            } else if in_rect(mouse.column, mouse.row, app.main_rect) {
+                app.focus = Focus::Main;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn in_rect(x: u16, y: u16, r: Rect) -> bool {
+    x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
 }

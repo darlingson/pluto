@@ -1,3 +1,4 @@
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use sqlx::PgPool;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -8,6 +9,12 @@ use crate::db;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Profiles,
+    Main,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Sidebar,
     Main,
 }
 
@@ -25,19 +32,151 @@ pub struct Schema {
     pub tables: Vec<String>,
 }
 
+pub enum Entry {
+    Schema(usize),
+    Table(usize, usize),
+}
+
+#[derive(Debug)]
+pub struct Sidebar {
+    pub list: ListState,
+    pub expanded: Vec<bool>,
+}
+
+impl Sidebar {
+    pub fn new() -> Self {
+        let mut list = ListState::default();
+        list.select(Some(0));
+        Self {
+            list,
+            expanded: Vec::new(),
+        }
+    }
+
+    pub fn is_expanded(&self, schema_idx: usize) -> bool {
+        self.expanded.get(schema_idx).copied().unwrap_or(true)
+    }
+
+    pub fn visible_len(&self, schemas: &[Schema]) -> usize {
+        schemas
+            .iter()
+            .enumerate()
+            .map(|(i, s)| 1 + if self.is_expanded(i) { s.tables.len() } else { 0 })
+            .sum()
+    }
+
+    pub fn entry_at(&self, schemas: &[Schema], index: usize) -> Option<Entry> {
+        let mut i = 0;
+        for (si, s) in schemas.iter().enumerate() {
+            if i == index {
+                return Some(Entry::Schema(si));
+            }
+            i += 1;
+            if self.is_expanded(si) {
+                for ti in 0..s.tables.len() {
+                    if i == index {
+                        return Some(Entry::Table(si, ti));
+                    }
+                    i += 1;
+                }
+            }
+        }
+        None
+    }
+
+    pub fn selected_entry(&self, schemas: &[Schema]) -> Option<Entry> {
+        self.list.selected().and_then(|i| self.entry_at(schemas, i))
+    }
+
+    fn index_of_schema(&self, schemas: &[Schema], si: usize) -> Option<usize> {
+        let mut i = 0;
+        for (j, s) in schemas.iter().enumerate() {
+            if j == si {
+                return Some(i);
+            }
+            i += 1 + if self.is_expanded(j) { s.tables.len() } else { 0 };
+        }
+        None
+    }
+
+    pub fn next(&mut self, schemas: &[Schema]) {
+        let len = self.visible_len(schemas);
+        if len == 0 {
+            return;
+        }
+        let i = self.list.selected().unwrap_or(0);
+        self.list.select(Some((i + 1).min(len - 1)));
+    }
+
+    pub fn prev(&mut self, schemas: &[Schema]) {
+        let i = self.list.selected().unwrap_or(0);
+        self.list.select(Some(i.saturating_sub(1)));
+    }
+
+    pub fn first(&mut self, schemas: &[Schema]) {
+        if self.visible_len(schemas) > 0 {
+            self.list.select(Some(0));
+        }
+    }
+
+    pub fn last(&mut self, schemas: &[Schema]) {
+        let len = self.visible_len(schemas);
+        if len > 0 {
+            self.list.select(Some(len - 1));
+        }
+    }
+
+    pub fn toggle(&mut self, schemas: &[Schema]) {
+        if let Some(Entry::Schema(si)) = self.selected_entry(schemas) {
+            self.set_expanded(si, !self.is_expanded(si));
+        }
+    }
+
+    pub fn collapse(&mut self, schemas: &[Schema]) {
+        match self.selected_entry(schemas) {
+            Some(Entry::Schema(si)) => self.set_expanded(si, false),
+            Some(Entry::Table(si, _)) => {
+                self.set_expanded(si, false);
+                if let Some(idx) = self.index_of_schema(schemas, si) {
+                    self.list.select(Some(idx));
+                }
+            }
+            None => {}
+        }
+    }
+
+    pub fn expand(&mut self, schemas: &[Schema]) {
+        if let Some(Entry::Schema(si)) = self.selected_entry(schemas) {
+            self.set_expanded(si, true);
+        }
+    }
+
+    fn set_expanded(&mut self, si: usize, value: bool) {
+        if si < self.expanded.len() {
+            self.expanded[si] = value;
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct App {
     pub screen: Screen,
     pub running: bool,
     pub status: String,
 
+    // profiles screen
     pub profiles: Vec<ConnectionProfile>,
     pub profile_list: ListState,
     pub connecting: bool,
 
+    // main screen
+    pub focus: Focus,
+    pub sidebar: Sidebar,
     pub pool: Option<PgPool>,
     pub schemas: Vec<Schema>,
     pub loading_tables: bool,
+    pub sidebar_rect: Rect,
+    pub main_rect: Rect,
 
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
@@ -63,9 +202,13 @@ impl App {
             profiles,
             profile_list,
             connecting: false,
+            focus: Focus::Sidebar,
+            sidebar: Sidebar::new(),
             pool: None,
             schemas: Vec::new(),
             loading_tables: false,
+            sidebar_rect: Rect::default(),
+            main_rect: Rect::default(),
             tx,
             rx,
         }
@@ -73,6 +216,13 @@ impl App {
 
     pub fn quit(&mut self) {
         self.running = false;
+    }
+
+    pub fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Sidebar => Focus::Main,
+            Focus::Main => Focus::Sidebar,
+        };
     }
 
     pub fn next_profile(&mut self) {
@@ -133,6 +283,14 @@ impl App {
         });
     }
 
+    pub fn select_table(&mut self, si: usize, ti: usize) {
+        if let (Some(schema), Some(table)) =
+            (self.schemas.get(si), self.schemas.get(si).and_then(|s| s.tables.get(ti)))
+        {
+            self.status = format!("selected {}.{} — data view lands in M4", schema.name, table);
+        }
+    }
+
     pub fn handle_db_event(&mut self, event: DbEvent) {
         match event {
             DbEvent::Connected(pool) => {
@@ -167,6 +325,10 @@ impl App {
                         }),
                     }
                 }
+                self.sidebar.expanded = vec![true; grouped.len()];
+                self.sidebar
+                    .list
+                    .select(if grouped.is_empty() { None } else { Some(0) });
                 self.schemas = grouped;
             }
             DbEvent::TablesFailed(msg) => {
