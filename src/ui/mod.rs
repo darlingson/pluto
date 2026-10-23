@@ -1,3 +1,5 @@
+mod grid_view;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -63,11 +65,6 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         Color::DarkGray
     };
-    let main_border = if app.focus == Focus::Main {
-        Color::Yellow
-    } else {
-        Color::DarkGray
-    };
 
     let mut items: Vec<ListItem> = Vec::new();
     for (si, schema) in app.schemas.iter().enumerate() {
@@ -99,29 +96,19 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
 
     frame.render_stateful_widget(sidebar, panes[0], &mut app.sidebar.list);
 
-    let text = if app.loading_tables {
-        " loading… "
-    } else {
-        "select a table from the sidebar\n\nits data lands here in M4"
-    };
-    let main = Paragraph::new(text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" main ")
-            .border_style(Style::default().fg(main_border)),
-    );
-    frame.render_widget(main, panes[1]);
+    grid_view::draw_grid(frame, app, panes[1]);
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let hints = match app.screen {
         Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
         Screen::Main => {
-            "Tab: panes  |  j/k/gg/G: move  |  Enter: open  |  h/l: fold  |  q: quit"
+            "Tab: panes  |  j/k/h/l: move  |  Ctrl+d/u: ½ page  |  gg/G: ends  |  [/]: page  |  r: refresh  |  q: quit"
         }
     };
     let status_color = if app.status.starts_with("connection failed")
         || app.status.starts_with("failed")
+        || app.status.starts_with("query failed")
     {
         Color::Red
     } else {

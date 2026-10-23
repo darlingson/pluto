@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod db;
+mod grid;
 mod ui;
 
 use std::io::stdout;
@@ -17,7 +18,6 @@ use ratatui::layout::Rect;
 use ratatui::DefaultTerminal;
 
 fn main() -> anyhow::Result<()> {
-    // CLI stopgap: pluto add <name> <host> <user> <password> <database> [sslmode]
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|a| a == "add") {
         return add_profile(&args);
@@ -137,6 +137,21 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
                 KeyCode::Char('l') | KeyCode::Right => app.sidebar.expand(&app.schemas),
                 _ => {}
             },
+            _ if app.focus == Focus::Main => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => app.grid.next_row(),
+                KeyCode::Char('k') | KeyCode::Up => app.grid.prev_row(),
+                KeyCode::Char('l') | KeyCode::Right => app.grid.next_col(),
+                KeyCode::Char('h') | KeyCode::Left => app.grid.prev_col(),
+                KeyCode::Char('g') => app.grid.top(),
+                KeyCode::Char('G') => app.grid.bottom(),
+                KeyCode::Char('d') if ctrl => app.grid.half_page_down(),
+                KeyCode::Char('u') if ctrl => app.grid.half_page_up(),
+                KeyCode::Char(']') => app.next_page(),
+                KeyCode::Char('[') => app.prev_page(),
+                KeyCode::Char('r') => app.refresh_table(),
+                KeyCode::Enter => app.status = "cell viewer lands in M6".to_string(),
+                _ => {}
+            },
             _ => {}
         },
     }
@@ -152,21 +167,57 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
         MouseEventKind::ScrollUp if in_rect(mouse.column, mouse.row, app.sidebar_rect) => {
             app.sidebar.prev(&app.schemas)
         }
+        MouseEventKind::ScrollDown if in_rect(mouse.column, mouse.row, app.grid_area) => {
+            for _ in 0..3 {
+                app.grid.next_row();
+            }
+        }
+        MouseEventKind::ScrollUp if in_rect(mouse.column, mouse.row, app.grid_area) => {
+            for _ in 0..3 {
+                app.grid.prev_row();
+            }
+        }
         MouseEventKind::Down(MouseButton::Left) => {
             if in_rect(mouse.column, mouse.row, app.sidebar_rect) {
                 app.focus = Focus::Sidebar;
-                // +1 skips the top border row; offset accounts for scrolled-out rows
                 let row = mouse.row.saturating_sub(app.sidebar_rect.y + 1) as usize;
                 let idx = app.sidebar.list.offset() + row;
                 if idx < app.sidebar.visible_len(&app.schemas) {
                     app.sidebar.list.select(Some(idx));
                 }
-            } else if in_rect(mouse.column, mouse.row, app.main_rect) {
+            } else if in_rect(mouse.column, mouse.row, app.grid_area) {
                 app.focus = Focus::Main;
+                let header_y = app.grid_area.y + 1;
+                let body_y = app.grid_area.y + 2;
+                if mouse.row == header_y {
+                    if let Some(ci) = col_at(&app.grid_col_starts, mouse.column) {
+                        if ci < app.grid.columns.len() {
+                            app.grid.selected_col = ci;
+                        }
+                    }
+                } else if mouse.row >= body_y {
+                    let row =
+                        (mouse.row - body_y) as usize + app.grid.table_state.offset();
+                    if row < app.grid.rows.len() {
+                        app.grid.table_state.select(Some(row));
+                        if let Some(ci) = col_at(&app.grid_col_starts, mouse.column) {
+                            if ci < app.grid.columns.len() {
+                                app.grid.selected_col = ci;
+                            }
+                        }
+                    }
+                }
             }
         }
         _ => {}
     }
+}
+
+fn col_at(starts: &[u16], x: u16) -> Option<usize> {
+    if starts.len() < 2 {
+        return None;
+    }
+    (0..starts.len() - 1).rev().find(|&i| x >= starts[i] && x < starts[i + 1])
 }
 
 fn in_rect(x: u16, y: u16, r: Rect) -> bool {

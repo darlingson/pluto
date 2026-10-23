@@ -5,6 +5,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::{self, ConnectionProfile};
 use crate::db;
+use crate::grid::{Grid, PAGE_SIZE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -24,6 +25,13 @@ pub enum DbEvent {
     ConnectFailed(String),
     TablesLoaded(Vec<(String, String)>),
     TablesFailed(String),
+    TablePageLoaded {
+        columns: Vec<String>,
+        rows: Vec<Vec<Option<String>>>,
+        total: usize,
+        page: usize,
+    },
+    TableQueryFailed(String),
 }
 
 #[derive(Debug)]
@@ -108,7 +116,7 @@ impl Sidebar {
         self.list.select(Some((i + 1).min(len - 1)));
     }
 
-    pub fn prev(&mut self, schemas: &[Schema]) {
+    pub fn prev(&mut self, _schemas: &[Schema]) {
         let i = self.list.selected().unwrap_or(0);
         self.list.select(Some(i.saturating_sub(1)));
     }
@@ -164,12 +172,10 @@ pub struct App {
     pub running: bool,
     pub status: String,
 
-    // profiles screen
     pub profiles: Vec<ConnectionProfile>,
     pub profile_list: ListState,
     pub connecting: bool,
 
-    // main screen
     pub focus: Focus,
     pub sidebar: Sidebar,
     pub pool: Option<PgPool>,
@@ -177,6 +183,11 @@ pub struct App {
     pub loading_tables: bool,
     pub sidebar_rect: Rect,
     pub main_rect: Rect,
+
+    pub grid: Grid,
+    pub current_table: Option<(String, String)>,
+    pub grid_area: Rect,
+    pub grid_col_starts: Vec<u16>,
 
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
@@ -209,6 +220,10 @@ impl App {
             loading_tables: false,
             sidebar_rect: Rect::default(),
             main_rect: Rect::default(),
+            grid: Grid::new(),
+            current_table: None,
+            grid_area: Rect::default(),
+            grid_col_starts: Vec::new(),
             tx,
             rx,
         }
@@ -284,10 +299,61 @@ impl App {
     }
 
     pub fn select_table(&mut self, si: usize, ti: usize) {
-        if let (Some(schema), Some(table)) =
-            (self.schemas.get(si), self.schemas.get(si).and_then(|s| s.tables.get(ti)))
-        {
-            self.status = format!("selected {}.{} — data view lands in M4", schema.name, table);
+        let names = self
+            .schemas
+            .get(si)
+            .and_then(|s| s.tables.get(ti).map(|t| (s.name.clone(), t.clone())));
+        if let Some((schema, table)) = names {
+            self.focus = Focus::Main;
+            self.current_table = Some((schema.clone(), table.clone()));
+            self.load_table_page(schema, table, 0);
+        }
+    }
+
+    fn load_table_page(&mut self, schema: String, table: String, page: usize) {
+        let Some(pool) = self.pool.clone() else { return };
+        self.grid.loading = true;
+        self.grid.page = page;
+        self.status = format!("loading {schema}.{table} (page {})…", page + 1);
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let event = match db::fetch_table_page(&pool, &schema, &table, page, PAGE_SIZE).await {
+                Ok(p) => DbEvent::TablePageLoaded {
+                    columns: p.columns,
+                    rows: p.rows,
+                    total: p.total_rows,
+                    page,
+                },
+                Err(e) => DbEvent::TableQueryFailed(e.to_string()),
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    pub fn next_page(&mut self) {
+        if self.grid.loading || self.current_table.is_none() {
+            return;
+        }
+        let next = self.grid.page + 1;
+        if next * PAGE_SIZE >= self.grid.total_rows {
+            self.status = "last page".to_string();
+            return;
+        }
+        let (s, t) = self.current_table.clone().unwrap();
+        self.load_table_page(s, t, next);
+    }
+
+    pub fn prev_page(&mut self) {
+        if self.grid.loading || self.grid.page == 0 || self.current_table.is_none() {
+            return;
+        }
+        let (s, t) = self.current_table.clone().unwrap();
+        self.load_table_page(s, t, self.grid.page - 1);
+    }
+
+    pub fn refresh_table(&mut self) {
+        if let Some((s, t)) = self.current_table.clone() {
+            self.load_table_page(s, t, self.grid.page);
         }
     }
 
@@ -334,6 +400,27 @@ impl App {
             DbEvent::TablesFailed(msg) => {
                 self.loading_tables = false;
                 self.status = format!("failed to load tables: {msg}");
+            }
+            DbEvent::TablePageLoaded {
+                columns,
+                rows,
+                total,
+                page,
+            } => {
+                self.grid.loading = false;
+                if page == self.grid.page {
+                    let label = self
+                        .current_table
+                        .as_ref()
+                        .map(|(s, t)| format!("{s}.{t}"))
+                        .unwrap_or_default();
+                    self.grid.set_data(columns, rows, total, page, label);
+                    self.status = format!("{total} rows total");
+                }
+            }
+            DbEvent::TableQueryFailed(msg) => {
+                self.grid.loading = false;
+                self.status = format!("query failed: {msg}");
             }
         }
     }
