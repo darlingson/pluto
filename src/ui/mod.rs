@@ -1,3 +1,4 @@
+mod editor;
 mod grid_view;
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -19,6 +20,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Screen::Main => draw_main(frame, app, root[0]),
     }
     draw_status_bar(frame, app, root[1]);
+
+    if app.editor.visible {
+        editor::draw_editor(frame, app);
+    }
 }
 
 fn draw_profiles(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -100,10 +105,12 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let hints = match app.screen {
-        Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
-        Screen::Main => {
-            "Tab: panes  |  j/k/h/l: move  |  Ctrl+d/u: ½ page  |  gg/G: ends  |  [/]: page  |  r: refresh  |  q: quit"
+    let hints = if app.editor.visible {
+        "Ctrl+Enter/F5: run  |  Esc: cancel  |  ↑/↓: history"
+    } else {
+        match app.screen {
+            Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
+            Screen::Main => "i: query  |  Tab: panes  |  j/k/h/l: move  |  Ctrl+d/u: ½ page  |  gg/G: ends  |  [/]: page  |  r: refresh  |  q: quit",
         }
     };
     let status_color = if app.status.starts_with("connection failed")
@@ -124,7 +131,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(status, area);
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([

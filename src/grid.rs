@@ -15,6 +15,7 @@ pub struct Grid {
     pub total_rows: usize,
     pub page: usize,
     pub loading: bool,
+    pub paged: bool,
     pub label: String,
     pub viewport_rows: usize,
 }
@@ -32,6 +33,7 @@ impl Grid {
             total_rows: 0,
             page: 0,
             loading: false,
+            paged: true,
             label: String::new(),
             viewport_rows: 10,
         }

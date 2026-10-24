@@ -6,6 +6,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::config::{self, ConnectionProfile};
 use crate::db;
 use crate::grid::{Grid, PAGE_SIZE};
+use crate::input::Editor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -189,6 +190,8 @@ pub struct App {
     pub grid_area: Rect,
     pub grid_col_starts: Vec<u16>,
 
+    pub editor: Editor,
+
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
 }
@@ -224,6 +227,7 @@ impl App {
             current_table: None,
             grid_area: Rect::default(),
             grid_col_starts: Vec::new(),
+            editor: Editor::new(),
             tx,
             rx,
         }
@@ -313,6 +317,7 @@ impl App {
     fn load_table_page(&mut self, schema: String, table: String, page: usize) {
         let Some(pool) = self.pool.clone() else { return };
         self.grid.loading = true;
+        self.grid.paged = true;
         self.grid.page = page;
         self.status = format!("loading {schema}.{table} (page {})…", page + 1);
         let tx = self.tx.clone();
@@ -331,7 +336,7 @@ impl App {
     }
 
     pub fn next_page(&mut self) {
-        if self.grid.loading || self.current_table.is_none() {
+        if self.grid.loading || !self.grid.paged || self.current_table.is_none() {
             return;
         }
         let next = self.grid.page + 1;
@@ -344,7 +349,7 @@ impl App {
     }
 
     pub fn prev_page(&mut self) {
-        if self.grid.loading || self.grid.page == 0 || self.current_table.is_none() {
+        if self.grid.loading || !self.grid.paged || self.grid.page == 0 || self.current_table.is_none() {
             return;
         }
         let (s, t) = self.current_table.clone().unwrap();
@@ -355,6 +360,47 @@ impl App {
         if let Some((s, t)) = self.current_table.clone() {
             self.load_table_page(s, t, self.grid.page);
         }
+    }
+
+    pub fn open_editor(&mut self) {
+        self.editor.open();
+    }
+
+    pub fn run_editor_query(&mut self) {
+        let sql = self.editor.text().trim().to_string();
+        self.editor.visible = false;
+        if sql.is_empty() {
+            return;
+        }
+        self.editor.push_history(sql.clone());
+
+        let Some(pool) = self.pool.clone() else { return };
+        self.focus = Focus::Main;
+        self.current_table = None;
+        self.grid.loading = true;
+        self.grid.paged = false;
+        self.grid.page = 0;
+        self.grid.label = if sql.chars().count() > 60 {
+            let mut s: String = sql.chars().take(57).collect();
+            s.push('…');
+            s
+        } else {
+            sql.clone()
+        };
+        self.status = "running query…".to_string();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let event = match db::run_query(&pool, &sql).await {
+                Ok(p) => DbEvent::TablePageLoaded {
+                    columns: p.columns,
+                    rows: p.rows,
+                    total: p.total_rows,
+                    page: 0,
+                },
+                Err(e) => DbEvent::TableQueryFailed(e.to_string()),
+            };
+            let _ = tx.send(event);
+        });
     }
 
     pub fn handle_db_event(&mut self, event: DbEvent) {
@@ -413,7 +459,7 @@ impl App {
                         .current_table
                         .as_ref()
                         .map(|(s, t)| format!("{s}.{t}"))
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| self.grid.label.clone());
                     self.grid.set_data(columns, rows, total, page, label);
                     self.status = format!("{total} rows total");
                 }

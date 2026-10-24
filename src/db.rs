@@ -50,27 +50,18 @@ pub struct TablePage {
     pub total_rows: usize,
 }
 
-pub async fn fetch_table_page(
-    pool: &PgPool,
-    schema: &str,
-    table: &str,
-    page: usize,
-    page_size: usize,
-) -> anyhow::Result<TablePage> {
-    let ident = quote_ident(schema, table);
-    let offset = page * page_size;
+pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
+    let result_rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
 
-     let describe = pool
-        .describe(&format!("SELECT * FROM {ident} LIMIT 0"))
-        .await?;
-    let columns: Vec<String> = describe
-        .columns()
-        .iter()
-        .map(|c| c.name().to_string())
-        .collect();
+    let columns: Vec<String> = if let Some(first) = result_rows.first() {
+        first.columns().iter().map(|c| c.name().to_string()).collect()
+    } else {
+        match pool.describe(sql).await {
+            Ok(d) => d.columns().iter().map(|c| c.name().to_string()).collect(),
+            Err(_) => Vec::new(),
+        }
+    };
 
-    let sql = format!("SELECT * FROM {ident} LIMIT {page_size} OFFSET {offset}");
-    let result_rows = sqlx::raw_sql(&sql).fetch_all(pool).await?;
     let rows: Vec<Vec<Option<String>>> = result_rows
         .iter()
         .map(|row| {
@@ -83,15 +74,30 @@ pub async fn fetch_table_page(
         })
         .collect();
 
+    let total_rows = rows.len();
+    Ok(TablePage {
+        columns,
+        rows,
+        total_rows,
+    })
+}
+
+pub async fn fetch_table_page(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+    page: usize,
+    page_size: usize,
+) -> anyhow::Result<TablePage> {
+    let ident = quote_ident(schema, table);
+    let sql = format!("SELECT * FROM {ident} LIMIT {page_size} OFFSET {}", page * page_size);
+    let mut result = run_query(pool, &sql).await?;
+
     let count_sql = format!("SELECT COUNT(*) FROM {ident}");
     let total: i64 = sqlx::raw_sql(&count_sql)
         .fetch_one(pool)
         .await?
         .try_get(0)?;
-
-    Ok(TablePage {
-        columns,
-        rows,
-        total_rows: total.max(0) as usize,
-    })
+    result.total_rows = total.max(0) as usize;
+    Ok(result)
 }

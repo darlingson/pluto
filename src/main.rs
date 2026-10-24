@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod db;
 mod grid;
+mod input;
 mod ui;
 
 use std::io::stdout;
@@ -31,6 +32,13 @@ fn main() -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen, event::EnableMouseCapture)?;
+    execute!(
+        stdout,
+        event::PushKeyboardEnhancementFlags(
+            event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        )
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = DefaultTerminal::new(backend)?;
 
@@ -38,6 +46,7 @@ fn main() -> anyhow::Result<()> {
     let result = run(&mut terminal, &mut app);
 
     disable_raw_mode()?;
+    execute!(terminal.backend_mut(), event::PopKeyboardEnhancementFlags)?;
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
@@ -73,6 +82,7 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
+        let _ = execute!(std::io::stdout(), event::PopKeyboardEnhancementFlags);
         let _ = execute!(std::io::stdout(), LeaveAlternateScreen, event::DisableMouseCapture);
         original(info);
     }));
@@ -107,6 +117,11 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
     if key.kind != KeyEventKind::Press {
         return;
     }
+    if app.screen == Screen::Main && app.editor.visible {
+        handle_editor_key(app, key);
+        return;
+    }
+
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     match app.screen {
@@ -123,6 +138,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Char('q') => app.quit(),
             KeyCode::Char('c') if ctrl => app.quit(),
             KeyCode::Tab => app.toggle_focus(),
+            KeyCode::Char('i') => app.open_editor(),
             _ if app.focus == Focus::Sidebar => match key.code {
                 KeyCode::Char('j') | KeyCode::Down => app.sidebar.next(&app.schemas),
                 KeyCode::Char('k') | KeyCode::Up => app.sidebar.prev(&app.schemas),
@@ -154,6 +170,28 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             },
             _ => {}
         },
+    }
+}
+
+fn handle_editor_key(app: &mut App, key: event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => app.editor.visible = false,
+        KeyCode::Enter if ctrl => app.run_editor_query(),
+        KeyCode::Char('r') if ctrl => app.run_editor_query(),
+        KeyCode::Char('e') if ctrl => app.run_editor_query(),
+        KeyCode::F(5) => app.run_editor_query(),
+        KeyCode::Enter => app.editor.newline(),
+        KeyCode::Backspace => app.editor.backspace(),
+        KeyCode::Delete => app.editor.delete_char(),
+        KeyCode::Left => app.editor.move_left(),
+        KeyCode::Right => app.editor.move_right(),
+        KeyCode::Up => app.editor.move_up(),
+        KeyCode::Down => app.editor.move_down(),
+        KeyCode::Home => app.editor.move_home(),
+        KeyCode::End => app.editor.move_end(),
+        KeyCode::Char(c) if !ctrl => app.editor.insert_char(c),
+        _ => {}
     }
 }
 
@@ -196,8 +234,7 @@ fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
                         }
                     }
                 } else if mouse.row >= body_y {
-                    let row =
-                        (mouse.row - body_y) as usize + app.grid.table_state.offset();
+                    let row = (mouse.row - body_y) as usize + app.grid.table_state.offset();
                     if row < app.grid.rows.len() {
                         app.grid.table_state.select(Some(row));
                         if let Some(ci) = col_at(&app.grid_col_starts, mouse.column) {

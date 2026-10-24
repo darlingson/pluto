@@ -38,11 +38,13 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let start = app.grid.page * PAGE_SIZE;
-    let total_pages = app.grid.total_rows.div_ceil(PAGE_SIZE).max(1);
-    let title = if app.grid.rows.is_empty() {
+    let title = if !app.grid.paged {
+        format!("{} — {} rows", app.grid.label, app.grid.rows.len())
+    } else if app.grid.rows.is_empty() {
         format!("{} — 0 rows", app.grid.label)
     } else {
+        let start = app.grid.page * PAGE_SIZE;
+        let total_pages = app.grid.total_rows.div_ceil(PAGE_SIZE).max(1);
         format!(
             "{} — rows {}-{} of {} (page {}/{})",
             app.grid.label,
