@@ -24,8 +24,10 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
             .border_style(Style::default().fg(border_color))
     };
 
-    if app.current_table.is_none() {
-        let p = Paragraph::new("select a table from the sidebar\n\nits data lands here")
+    let nothing_loaded =
+        app.grid.columns.is_empty() && app.grid.rows.is_empty() && !app.grid.loading;
+    if app.current_table.is_none() && nothing_loaded {
+        let p = Paragraph::new("select a table, or press i to run a query")
             .block(block("main".to_string()));
         frame.render_widget(p, area);
         return;
