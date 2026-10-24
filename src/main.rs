@@ -121,6 +121,10 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         handle_editor_key(app, key);
         return;
     }
+    if app.screen == Screen::Main && app.viewer.visible {
+        handle_viewer_key(app, key);
+        return;
+    }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -139,6 +143,8 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Char('c') if ctrl => app.quit(),
             KeyCode::Tab => app.toggle_focus(),
             KeyCode::Char('i') => app.open_editor(),
+            KeyCode::Char('f') => app.toggle_focus_mode(),
+            KeyCode::Esc => app.focus_mode = false,
             _ if app.focus == Focus::Sidebar => match key.code {
                 KeyCode::Char('j') | KeyCode::Down => app.sidebar.next(&app.schemas),
                 KeyCode::Char('k') | KeyCode::Up => app.sidebar.prev(&app.schemas),
@@ -165,7 +171,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
                 KeyCode::Char(']') => app.next_page(),
                 KeyCode::Char('[') => app.prev_page(),
                 KeyCode::Char('r') => app.refresh_table(),
-                KeyCode::Enter => app.status = "cell viewer lands in M6".to_string(),
+                KeyCode::Enter => app.open_cell_viewer(),
                 _ => {}
             },
             _ => {}
@@ -195,8 +201,37 @@ fn handle_editor_key(app: &mut App, key: event::KeyEvent) {
     }
 }
 
+fn handle_viewer_key(app: &mut App, key: event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let half = (app.viewer_page / 2).max(1);
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => app.viewer.close(),
+        KeyCode::Char('q') => app.viewer.close(),
+        KeyCode::Char('j') | KeyCode::Down => app.viewer.scroll = app.viewer.scroll.saturating_add(1),
+        KeyCode::Char('k') | KeyCode::Up => app.viewer.scroll = app.viewer.scroll.saturating_sub(1),
+        KeyCode::Char('d') if ctrl => app.viewer.scroll = app.viewer.scroll.saturating_add(half),
+        KeyCode::Char('u') if ctrl => app.viewer.scroll = app.viewer.scroll.saturating_sub(half),
+        KeyCode::Char('g') => app.viewer.scroll = 0,
+        KeyCode::Char('G') => app.viewer.scroll = usize::MAX, // clamped at draw
+        _ => {}
+    }
+}
+
 fn handle_mouse(app: &mut App, mouse: event::MouseEvent) {
     use crossterm::event::{MouseButton, MouseEventKind};
+
+    if app.viewer.visible {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                app.viewer.scroll = app.viewer.scroll.saturating_add(3);
+            }
+            MouseEventKind::ScrollUp => {
+                app.viewer.scroll = app.viewer.scroll.saturating_sub(3);
+            }
+            _ => {}
+        }
+        return;
+    }
 
     match mouse.kind {
         MouseEventKind::ScrollDown if in_rect(mouse.column, mouse.row, app.sidebar_rect) => {

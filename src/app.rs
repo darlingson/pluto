@@ -47,6 +47,36 @@ pub enum Entry {
 }
 
 #[derive(Debug)]
+pub struct Viewer {
+    pub visible: bool,
+    pub title: String,
+    pub content: String,
+    pub scroll: usize,
+}
+
+impl Viewer {
+    pub fn new() -> Self {
+        Self {
+            visible: false,
+            title: String::new(),
+            content: String::new(),
+            scroll: 0,
+        }
+    }
+
+    pub fn open(&mut self, title: String, content: String) {
+        self.title = title;
+        self.content = content;
+        self.scroll = 0;
+        self.visible = true;
+    }
+
+    pub fn close(&mut self) {
+        self.visible = false;
+    }
+}
+
+#[derive(Debug)]
 pub struct Sidebar {
     pub list: ListState,
     pub expanded: Vec<bool>,
@@ -191,6 +221,10 @@ pub struct App {
     pub grid_col_starts: Vec<u16>,
 
     pub editor: Editor,
+    pub viewer: Viewer,
+    pub focus_mode: bool,
+    pub focus_scroll: usize,
+    pub viewer_page: usize,
 
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
@@ -228,6 +262,10 @@ impl App {
             grid_area: Rect::default(),
             grid_col_starts: Vec::new(),
             editor: Editor::new(),
+            viewer: Viewer::new(),
+            focus_mode: false,
+            focus_scroll: 0,
+            viewer_page: 10,
             tx,
             rx,
         }
@@ -242,6 +280,28 @@ impl App {
             Focus::Sidebar => Focus::Main,
             Focus::Main => Focus::Sidebar,
         };
+    }
+
+    pub fn toggle_focus_mode(&mut self) {
+        if self.grid.rows.is_empty() {
+            self.status = "nothing to focus".to_string();
+            return;
+        }
+        self.focus_mode = !self.focus_mode;
+        self.focus_scroll = 0;
+    }
+
+    pub fn open_cell_viewer(&mut self) {
+        let row = self.grid.selected_row();
+        let col = self.grid.selected_col;
+        let Some(cell) = self.grid.rows.get(row).and_then(|r| r.get(col)) else {
+            self.status = "no cell selected".to_string();
+            return;
+        };
+        let col_name = self.grid.columns.get(col).cloned().unwrap_or_default();
+        let content = cell.clone().unwrap_or_else(|| "(NULL)".to_string());
+        let title = format!("{} — row {} — {}", self.grid.label, row + 1, col_name);
+        self.viewer.open(title, content);
     }
 
     pub fn next_profile(&mut self) {
@@ -309,6 +369,7 @@ impl App {
             .and_then(|s| s.tables.get(ti).map(|t| (s.name.clone(), t.clone())));
         if let Some((schema, table)) = names {
             self.focus = Focus::Main;
+            self.focus_mode = false;
             self.current_table = Some((schema.clone(), table.clone()));
             self.load_table_page(schema, table, 0);
         }
@@ -376,6 +437,7 @@ impl App {
 
         let Some(pool) = self.pool.clone() else { return };
         self.focus = Focus::Main;
+        self.focus_mode = false;
         self.current_table = None;
         self.grid.loading = true;
         self.grid.paged = false;
@@ -461,6 +523,7 @@ impl App {
                         .map(|(s, t)| format!("{s}.{t}"))
                         .unwrap_or_else(|| self.grid.label.clone());
                     self.grid.set_data(columns, rows, total, page, label);
+                    self.focus_scroll = 0;
                     self.status = format!("{total} rows total");
                 }
             }
