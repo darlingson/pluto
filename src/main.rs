@@ -144,6 +144,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Tab => app.toggle_focus(),
             KeyCode::Char('i') => app.open_editor(),
             KeyCode::Char('f') => app.toggle_focus_mode(),
+            KeyCode::Char('m') => app.toggle_metadata(),
             KeyCode::Esc => app.focus_mode = false,
             _ if app.focus == Focus::Sidebar => match key.code {
                 KeyCode::Char('j') | KeyCode::Down => app.sidebar.next(&app.schemas),
@@ -172,6 +173,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
                 KeyCode::Char('[') => app.prev_page(),
                 KeyCode::Char('r') => app.refresh_table(),
                 KeyCode::Enter => app.open_cell_viewer(),
+                KeyCode::Char('s') => app.cycle_sort(),
                 _ => {}
             },
             _ => {}

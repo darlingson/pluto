@@ -18,6 +18,7 @@ pub struct Grid {
     pub paged: bool,
     pub label: String,
     pub viewport_rows: usize,
+    pub sort: Option<(usize, bool)>,
 }
 
 impl Grid {
@@ -36,6 +37,7 @@ impl Grid {
             paged: true,
             label: String::new(),
             viewport_rows: 10,
+            sort: None,
         }
     }
 

@@ -46,7 +46,7 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let start = app.grid.page * PAGE_SIZE;
-    let title = if !app.grid.paged {
+    let mut title = if !app.grid.paged {
         format!("{} — {} rows", app.grid.label, app.grid.rows.len())
     } else if app.grid.rows.is_empty() {
         format!("{} — 0 rows", app.grid.label)
@@ -62,6 +62,15 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
             total_pages
         )
     };
+    if let Some((ci, asc)) = app.grid.sort {
+        if let Some(c) = app.grid.columns.get(ci) {
+            title.push_str(&format!(
+                "  ORDER BY {} {}",
+                c,
+                if asc { "ASC" } else { "DESC" }
+            ));
+        }
+    }
 
     let selected_row = app.grid.selected_row();
     let selected_col = app.grid.selected_col;
@@ -72,6 +81,11 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
             .iter()
             .enumerate()
             .map(|(i, c)| {
+                let text = match app.grid.sort {
+                    Some((ci, true)) if ci == i => format!("{c} ↑"),
+                    Some((ci, false)) if ci == i => format!("{c} ↓"),
+                    _ => c.clone(),
+                };
                 let style = if i == selected_col {
                     Style::default()
                         .fg(Color::Yellow)
@@ -79,7 +93,7 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
                 };
-                Cell::from(Span::styled(c.clone(), style))
+                Cell::from(Span::styled(text, style))
             })
             .collect::<Vec<_>>(),
     );
@@ -155,7 +169,12 @@ fn draw_focus_mode(frame: &mut Frame, app: &mut App, area: Rect, border_color: C
         } else {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         };
-        lines.push(Line::from(Span::styled(col.clone(), header_style)));
+        let label = match app.grid.sort {
+            Some((si, true)) if si == ci => format!("{col} ↑"),
+            Some((si, false)) if si == ci => format!("{col} ↓"),
+            _ => col.clone(),
+        };
+        lines.push(Line::from(Span::styled(label, header_style)));
 
         let value = app.grid.rows[sel_row].get(ci);
         let (text, style) = match value {

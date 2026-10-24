@@ -68,6 +68,21 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
     app.sidebar_rect = panes[0];
     app.main_rect = panes[1];
 
+    draw_sidebar(frame, app, panes[0]);
+
+    if app.metadata_open {
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .split(panes[1]);
+        grid_view::draw_grid(frame, app, split[0]);
+        draw_metadata(frame, app, split[1]);
+    } else {
+        grid_view::draw_grid(frame, app, panes[1]);
+    }
+}
+
+fn draw_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let sidebar_border = if app.focus == Focus::Sidebar {
         Color::Yellow
     } else {
@@ -102,9 +117,81 @@ fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .highlight_symbol("> ");
 
-    frame.render_stateful_widget(sidebar, panes[0], &mut app.sidebar.list);
+    frame.render_stateful_widget(sidebar, area, &mut app.sidebar.list);
+}
 
-    grid_view::draw_grid(frame, app, panes[1]);
+fn draw_metadata(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" metadata — m to close ")
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let Some((label, meta)) = &app.metadata else {
+        let p = Paragraph::new(if app.loading_metadata {
+            " loading… "
+        } else {
+            " no metadata "
+        })
+        .block(block);
+        frame.render_widget(p, area);
+        return;
+    };
+
+    let cell = |row: &[Option<String>], i: usize| -> String {
+        row.get(i).and_then(|c| c.clone()).unwrap_or_default()
+    };
+
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        format!(" {label}"),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ))];
+
+    for row in &meta.columns.rows {
+        let pk = cell(row, 4) == "t" || cell(row, 4).eq_ignore_ascii_case("true");
+        let mut spans = vec![
+            Span::styled(
+                format!(" {:<24}", cell(row, 0)),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" {:<14}", cell(row, 1))),
+            Span::styled(
+                if cell(row, 2) == "YES" { " nullable  " } else { " not null  " },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ];
+        let default = cell(row, 3);
+        if !default.is_empty() {
+            spans.push(Span::styled(
+                format!("default: {default}"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if pk {
+            spans.push(Span::styled(
+                "  PK",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    if !meta.indexes.rows.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            " indexes",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )));
+        for row in &meta.indexes.rows {
+            lines.push(Line::from(format!(
+                "  {} — {}",
+                cell(row, 0),
+                cell(row, 1)
+            )));
+        }
+    }
+
+    let p = Paragraph::new(lines).block(block);
+    frame.render_widget(p, area);
 }
 
 fn draw_viewer(frame: &mut Frame, app: &mut App) {
@@ -184,7 +271,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         match app.screen {
             Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
-            Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  j/k/h/l: move  |  [/]: page  |  r: refresh  |  q: quit",
+            Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  m: meta  |  s: sort  |  [/]: page  |  q: quit",
         }
     };
     let status_color = if app.status.starts_with("connection failed")

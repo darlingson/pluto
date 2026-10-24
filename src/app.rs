@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::{self, ConnectionProfile};
-use crate::db;
+use crate::db::{self, Metadata};
 use crate::grid::{Grid, PAGE_SIZE};
 use crate::input::Editor;
 
@@ -33,6 +33,8 @@ pub enum DbEvent {
         page: usize,
     },
     TableQueryFailed(String),
+    MetadataLoaded { label: String, meta: Metadata },
+    MetadataFailed(String),
 }
 
 #[derive(Debug)]
@@ -226,6 +228,10 @@ pub struct App {
     pub focus_scroll: usize,
     pub viewer_page: usize,
 
+    pub metadata_open: bool,
+    pub loading_metadata: bool,
+    pub metadata: Option<(String, Metadata)>,
+
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
 }
@@ -266,6 +272,9 @@ impl App {
             focus_mode: false,
             focus_scroll: 0,
             viewer_page: 10,
+            metadata_open: false,
+            loading_metadata: false,
+            metadata: None,
             tx,
             rx,
         }
@@ -289,6 +298,63 @@ impl App {
         }
         self.focus_mode = !self.focus_mode;
         self.focus_scroll = 0;
+    }
+
+    pub fn toggle_metadata(&mut self) {
+        if self.current_table.is_none() {
+            self.status = "select a table first".to_string();
+            return;
+        }
+        self.metadata_open = !self.metadata_open;
+        if self.metadata_open {
+            self.load_metadata();
+        }
+    }
+
+    fn load_metadata(&mut self) {
+        let Some((schema, table)) = self.current_table.clone() else {
+            return;
+        };
+        let label = format!("{schema}.{table}");
+        if let Some((l, _)) = &self.metadata {
+            if *l == label {
+                return;
+            }
+        }
+        let Some(pool) = self.pool.clone() else { return };
+        self.loading_metadata = true;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let event = match db::load_metadata(&pool, &schema, &table).await {
+                Ok(meta) => DbEvent::MetadataLoaded { label, meta },
+                Err(e) => DbEvent::MetadataFailed(e.to_string()),
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    pub fn cycle_sort(&mut self) {
+        if !self.grid.paged || self.current_table.is_none() {
+            self.status = "sorting applies to table browsing".to_string();
+            return;
+        }
+        if self.grid.columns.is_empty() {
+            return;
+        }
+        let col = self.grid.selected_col;
+        self.grid.sort = match self.grid.sort {
+            Some((c, true)) if c == col => Some((c, false)),
+            Some((c, false)) if c == col => None,
+            _ => Some((col, true)),
+        };
+        self.status = match self.grid.sort {
+            Some((c, true)) => format!("sorted by {} ASC", self.grid.columns[c]),
+            Some((c, false)) => format!("sorted by {} DESC", self.grid.columns[c]),
+            None => "sort cleared".to_string(),
+        };
+        if let Some((s, t)) = self.current_table.clone() {
+            self.load_table_page(s, t, 0);
+        }
     }
 
     pub fn open_cell_viewer(&mut self) {
@@ -370,28 +436,38 @@ impl App {
         if let Some((schema, table)) = names {
             self.focus = Focus::Main;
             self.focus_mode = false;
+            self.grid.sort = None;
             self.current_table = Some((schema.clone(), table.clone()));
             self.load_table_page(schema, table, 0);
+            if self.metadata_open {
+                self.metadata = None;
+                self.load_metadata();
+            }
         }
     }
 
     fn load_table_page(&mut self, schema: String, table: String, page: usize) {
         let Some(pool) = self.pool.clone() else { return };
+        let order = self
+            .grid
+            .sort
+            .and_then(|(ci, asc)| self.grid.columns.get(ci).map(|c| (c.clone(), asc)));
         self.grid.loading = true;
         self.grid.paged = true;
         self.grid.page = page;
         self.status = format!("loading {schema}.{table} (page {})…", page + 1);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let event = match db::fetch_table_page(&pool, &schema, &table, page, PAGE_SIZE).await {
-                Ok(p) => DbEvent::TablePageLoaded {
-                    columns: p.columns,
-                    rows: p.rows,
-                    total: p.total_rows,
-                    page,
-                },
-                Err(e) => DbEvent::TableQueryFailed(e.to_string()),
-            };
+            let event =
+                match db::fetch_table_page(&pool, &schema, &table, page, PAGE_SIZE, order).await {
+                    Ok(p) => DbEvent::TablePageLoaded {
+                        columns: p.columns,
+                        rows: p.rows,
+                        total: p.total_rows,
+                        page,
+                    },
+                    Err(e) => DbEvent::TableQueryFailed(e.to_string()),
+                };
             let _ = tx.send(event);
         });
     }
@@ -438,6 +514,8 @@ impl App {
         let Some(pool) = self.pool.clone() else { return };
         self.focus = Focus::Main;
         self.focus_mode = false;
+        self.grid.sort = None;
+        self.metadata_open = false;
         self.current_table = None;
         self.grid.loading = true;
         self.grid.paged = false;
@@ -530,6 +608,15 @@ impl App {
             DbEvent::TableQueryFailed(msg) => {
                 self.grid.loading = false;
                 self.status = format!("query failed: {msg}");
+            }
+            DbEvent::MetadataLoaded { label, meta } => {
+                self.loading_metadata = false;
+                self.metadata = Some((label, meta));
+            }
+            DbEvent::MetadataFailed(msg) => {
+                self.loading_metadata = false;
+                self.metadata_open = false;
+                self.status = format!("metadata failed: {msg}");
             }
         }
     }

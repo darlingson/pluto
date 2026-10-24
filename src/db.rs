@@ -11,9 +11,16 @@ fn ssl_mode(s: &str) -> PgSslMode {
     }
 }
 
+fn quote_col(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
 fn quote_ident(schema: &str, table: &str) -> String {
-    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    format!("{}.{}", q(schema), q(table))
+    format!("{}.{}", quote_col(schema), quote_col(table))
+}
+
+fn quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 pub async fn connect(profile: &ConnectionProfile) -> anyhow::Result<PgPool> {
@@ -44,10 +51,17 @@ pub async fn load_tables(pool: &PgPool) -> anyhow::Result<Vec<(String, String)>>
         .collect())
 }
 
+#[derive(Debug)]
 pub struct TablePage {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<Option<String>>>,
     pub total_rows: usize,
+}
+
+#[derive(Debug)]
+pub struct Metadata {
+    pub columns: TablePage,
+    pub indexes: TablePage,
 }
 
 pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
@@ -88,9 +102,16 @@ pub async fn fetch_table_page(
     table: &str,
     page: usize,
     page_size: usize,
+    order: Option<(String, bool)>,
 ) -> anyhow::Result<TablePage> {
     let ident = quote_ident(schema, table);
-    let sql = format!("SELECT * FROM {ident} LIMIT {page_size} OFFSET {}", page * page_size);
+    let order_clause = order
+        .map(|(col, asc)| format!(" ORDER BY {} {}", quote_col(&col), if asc { "ASC" } else { "DESC" }))
+        .unwrap_or_default();
+    let sql = format!(
+        "SELECT * FROM {ident}{order_clause} LIMIT {page_size} OFFSET {}",
+        page * page_size
+    );
     let mut result = run_query(pool, &sql).await?;
 
     let count_sql = format!("SELECT COUNT(*) FROM {ident}");
@@ -100,4 +121,41 @@ pub async fn fetch_table_page(
         .try_get(0)?;
     result.total_rows = total.max(0) as usize;
     Ok(result)
+}
+
+pub async fn load_metadata(pool: &PgPool, schema: &str, table: &str) -> anyhow::Result<Metadata> {
+    let s = quote_literal(schema);
+    let t = quote_literal(table);
+
+    let cols_sql = format!(
+        "SELECT c.column_name AS name,
+                c.data_type AS data_type,
+                c.is_nullable AS is_nullable,
+                c.column_default AS column_default,
+                EXISTS (
+                    SELECT 1
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON kcu.constraint_schema = tc.constraint_schema
+                     AND kcu.constraint_name = tc.constraint_name
+                    WHERE tc.constraint_type = 'PRIMARY KEY'
+                      AND tc.table_schema = c.table_schema
+                      AND tc.table_name = c.table_name
+                      AND kcu.column_name = c.column_name
+                ) AS is_pk
+         FROM information_schema.columns c
+         WHERE c.table_schema = {s} AND c.table_name = {t}
+         ORDER BY c.ordinal_position"
+    );
+    let columns = run_query(pool, &cols_sql).await?;
+
+    let idx_sql = format!(
+        "SELECT indexname AS name, indexdef AS definition
+         FROM pg_indexes
+         WHERE schemaname = {s} AND tablename = {t}
+         ORDER BY indexname"
+    );
+    let indexes = run_query(pool, &idx_sql).await?;
+
+    Ok(Metadata { columns, indexes })
 }
