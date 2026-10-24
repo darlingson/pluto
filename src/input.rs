@@ -159,7 +159,7 @@ impl Editor {
         }
     }
 
-    fn set_text(&mut self, text: String) {
+    pub fn set_text(&mut self, text: String) {
         self.lines = if text.is_empty() {
             vec![String::new()]
         } else {

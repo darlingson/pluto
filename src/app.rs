@@ -223,6 +223,7 @@ pub struct App {
     pub grid_col_starts: Vec<u16>,
 
     pub editor: Editor,
+    pub editor_filter: bool,
     pub viewer: Viewer,
     pub focus_mode: bool,
     pub focus_scroll: usize,
@@ -249,6 +250,8 @@ impl App {
         } else {
             String::new()
         };
+        let mut editor = Editor::new();
+        editor.history = config::load_history();
         Self {
             screen: Screen::Profiles,
             running: true,
@@ -267,7 +270,8 @@ impl App {
             current_table: None,
             grid_area: Rect::default(),
             grid_col_starts: Vec::new(),
-            editor: Editor::new(),
+            editor,
+            editor_filter: false,
             viewer: Viewer::new(),
             focus_mode: false,
             focus_scroll: 0,
@@ -370,6 +374,54 @@ impl App {
         self.viewer.open(title, content);
     }
 
+    pub fn export_csv(&mut self) {
+        if self.grid.columns.is_empty() {
+            self.status = "nothing to export".to_string();
+            return;
+        }
+        let visible: Vec<usize> = (0..self.grid.columns.len())
+            .filter(|&i| !self.grid.hidden(i))
+            .collect();
+
+        let mut out = String::new();
+        out.push_str(&csv_line(
+            visible.iter().map(|&i| self.grid.columns[i].as_str()),
+        ));
+        for row in &self.grid.rows {
+            out.push_str(&csv_line(
+                visible
+                    .iter()
+                    .map(|&i| row.get(i).and_then(|c| c.as_deref()).unwrap_or("")),
+            ));
+        }
+
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let safe: String = self
+            .grid
+            .label
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe = if safe.is_empty() { "query".to_string() } else { safe };
+        let path = format!("pluto-{safe}-{epoch}.csv");
+
+        match std::fs::write(&path, out) {
+            Ok(()) => {
+                self.status = format!("exported {} rows → {path}", self.grid.rows.len())
+            }
+            Err(e) => self.status = format!("export failed: {e}"),
+        }
+    }
+
     pub fn next_profile(&mut self) {
         if self.profiles.is_empty() {
             return;
@@ -437,6 +489,7 @@ impl App {
             self.focus = Focus::Main;
             self.focus_mode = false;
             self.grid.sort = None;
+            self.grid.filter = None;
             self.current_table = Some((schema.clone(), table.clone()));
             self.load_table_page(schema, table, 0);
             if self.metadata_open {
@@ -452,22 +505,32 @@ impl App {
             .grid
             .sort
             .and_then(|(ci, asc)| self.grid.columns.get(ci).map(|c| (c.clone(), asc)));
+        let filter = self.grid.filter.clone();
         self.grid.loading = true;
         self.grid.paged = true;
         self.grid.page = page;
         self.status = format!("loading {schema}.{table} (page {})…", page + 1);
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let event =
-                match db::fetch_table_page(&pool, &schema, &table, page, PAGE_SIZE, order).await {
-                    Ok(p) => DbEvent::TablePageLoaded {
-                        columns: p.columns,
-                        rows: p.rows,
-                        total: p.total_rows,
-                        page,
-                    },
-                    Err(e) => DbEvent::TableQueryFailed(e.to_string()),
-                };
+            let event = match db::fetch_table_page(
+                &pool,
+                &schema,
+                &table,
+                page,
+                PAGE_SIZE,
+                order,
+                filter,
+            )
+            .await
+            {
+                Ok(p) => DbEvent::TablePageLoaded {
+                    columns: p.columns,
+                    rows: p.rows,
+                    total: p.total_rows,
+                    page,
+                },
+                Err(e) => DbEvent::TableQueryFailed(e.to_string()),
+            };
             let _ = tx.send(event);
         });
     }
@@ -500,37 +563,72 @@ impl App {
     }
 
     pub fn open_editor(&mut self) {
+        self.editor_filter = false;
         self.editor.open();
     }
 
-    pub fn run_editor_query(&mut self) {
-        let sql = self.editor.text().trim().to_string();
-        self.editor.visible = false;
-        if sql.is_empty() {
+    pub fn open_filter_editor(&mut self) {
+        if !self.grid.paged || self.current_table.is_none() {
+            self.status = "open a table first".to_string();
             return;
         }
-        self.editor.push_history(sql.clone());
+        self.editor_filter = true;
+        self.editor.open();
+        if let Some(f) = self.grid.filter.clone() {
+            self.editor.set_text(f);
+        }
+    }
+
+    pub fn run_editor_query(&mut self) {
+        let text = self.editor.text().trim().to_string();
+        self.editor.visible = false;
+
+        if self.editor_filter {
+            self.editor_filter = false;
+            if !text.is_empty() {
+                self.editor.push_history(text.clone());
+                let _ = config::save_history(&self.editor.history);
+            }
+            if text.is_empty() {
+                self.grid.filter = None;
+                self.status = "filter cleared".to_string();
+            } else {
+                self.grid.filter = Some(text.clone());
+                self.status = format!("filter: {text}");
+            }
+            if let Some((s, t)) = self.current_table.clone() {
+                self.load_table_page(s, t, 0);
+            }
+            return;
+        }
+
+        if text.is_empty() {
+            return;
+        }
+        self.editor.push_history(text.clone());
+        let _ = config::save_history(&self.editor.history);
 
         let Some(pool) = self.pool.clone() else { return };
         self.focus = Focus::Main;
         self.focus_mode = false;
         self.grid.sort = None;
+        self.grid.filter = None;
         self.metadata_open = false;
         self.current_table = None;
         self.grid.loading = true;
         self.grid.paged = false;
         self.grid.page = 0;
-        self.grid.label = if sql.chars().count() > 60 {
-            let mut s: String = sql.chars().take(57).collect();
+        self.grid.label = if text.chars().count() > 60 {
+            let mut s: String = text.chars().take(57).collect();
             s.push('…');
             s
         } else {
-            sql.clone()
+            text.clone()
         };
         self.status = "running query…".to_string();
         let tx = self.tx.clone();
         tokio::spawn(async move {
-            let event = match db::run_query(&pool, &sql).await {
+            let event = match db::run_query(&pool, &text).await {
                 Ok(p) => DbEvent::TablePageLoaded {
                     columns: p.columns,
                     rows: p.rows,
@@ -619,5 +717,20 @@ impl App {
                 self.status = format!("metadata failed: {msg}");
             }
         }
+    }
+}
+
+fn csv_line<'a>(fields: impl Iterator<Item = &'a str>) -> String {
+    let escaped: Vec<String> = fields.map(csv_escape).collect();
+    let mut line = escaped.join(",");
+    line.push('\n');
+    line
+}
+
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
     }
 }

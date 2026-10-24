@@ -96,6 +96,7 @@ pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn fetch_table_page(
     pool: &PgPool,
     schema: &str,
@@ -103,18 +104,20 @@ pub async fn fetch_table_page(
     page: usize,
     page_size: usize,
     order: Option<(String, bool)>,
+    filter: Option<String>,
 ) -> anyhow::Result<TablePage> {
     let ident = quote_ident(schema, table);
+    let where_clause = filter.map(|f| format!(" WHERE {f}")).unwrap_or_default();
     let order_clause = order
         .map(|(col, asc)| format!(" ORDER BY {} {}", quote_col(&col), if asc { "ASC" } else { "DESC" }))
         .unwrap_or_default();
     let sql = format!(
-        "SELECT * FROM {ident}{order_clause} LIMIT {page_size} OFFSET {}",
+        "SELECT * FROM {ident}{where_clause}{order_clause} LIMIT {page_size} OFFSET {}",
         page * page_size
     );
     let mut result = run_query(pool, &sql).await?;
 
-    let count_sql = format!("SELECT COUNT(*) FROM {ident}");
+    let count_sql = format!("SELECT COUNT(*) FROM {ident}{where_clause}");
     let total: i64 = sqlx::raw_sql(&count_sql)
         .fetch_one(pool)
         .await?

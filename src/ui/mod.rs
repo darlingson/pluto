@@ -271,7 +271,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         match app.screen {
             Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
-            Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  m: meta  |  s: sort  |  [/]: page  |  q: quit",
+            Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  m: meta  |  s: sort  |  w: filter  |  e: CSV  |  </>: width  |  x: hide  |  0: reset  |  q: quit",
         }
     };
     let status_color = if app.status.starts_with("connection failed")

@@ -17,9 +17,15 @@ pub fn draw_editor(frame: &mut Frame, app: &mut App) {
         app.editor.scroll = app.editor.cursor_row + 1 - inner_height;
     }
 
+     let title = if app.editor_filter {
+        " where filter — Ctrl+R: apply · empty clears "
+    } else {
+        " query editor — Ctrl+R: run "
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" query editor ")
+        .title(title)
         .border_style(Style::default().fg(Color::Yellow));
 
     let text = app.editor.lines.join("\n");

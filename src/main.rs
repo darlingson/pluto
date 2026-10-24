@@ -143,8 +143,9 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Char('c') if ctrl => app.quit(),
             KeyCode::Tab => app.toggle_focus(),
             KeyCode::Char('i') => app.open_editor(),
-            KeyCode::Char('f') => app.toggle_focus_mode(),
+            KeyCode::Char('w') => app.open_filter_editor(),
             KeyCode::Char('m') => app.toggle_metadata(),
+            KeyCode::Char('f') => app.toggle_focus_mode(),
             KeyCode::Esc => app.focus_mode = false,
             _ if app.focus == Focus::Sidebar => match key.code {
                 KeyCode::Char('j') | KeyCode::Down => app.sidebar.next(&app.schemas),
@@ -172,8 +173,13 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
                 KeyCode::Char(']') => app.next_page(),
                 KeyCode::Char('[') => app.prev_page(),
                 KeyCode::Char('r') => app.refresh_table(),
-                KeyCode::Enter => app.open_cell_viewer(),
                 KeyCode::Char('s') => app.cycle_sort(),
+                KeyCode::Char('-') => app.grid.widen_col(),
+                KeyCode::Char('=') => app.grid.narrow_col(),
+                KeyCode::Char('x') => app.grid.toggle_hide_col(),
+                KeyCode::Char('0') => app.grid.reset_layout(),
+                KeyCode::Char('e') => app.export_csv(),
+                KeyCode::Enter => app.open_cell_viewer(),
                 _ => {}
             },
             _ => {}
@@ -214,7 +220,7 @@ fn handle_viewer_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Char('d') if ctrl => app.viewer.scroll = app.viewer.scroll.saturating_add(half),
         KeyCode::Char('u') if ctrl => app.viewer.scroll = app.viewer.scroll.saturating_sub(half),
         KeyCode::Char('g') => app.viewer.scroll = 0,
-        KeyCode::Char('G') => app.viewer.scroll = usize::MAX, // clamped at draw
+        KeyCode::Char('G') => app.viewer.scroll = usize::MAX,
         _ => {}
     }
 }

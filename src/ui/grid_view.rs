@@ -45,6 +45,10 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let visible: Vec<usize> = (0..app.grid.columns.len())
+        .filter(|&i| !app.grid.hidden(i))
+        .collect();
+
     let start = app.grid.page * PAGE_SIZE;
     let mut title = if !app.grid.paged {
         format!("{} — {} rows", app.grid.label, app.grid.rows.len())
@@ -62,6 +66,11 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
             total_pages
         )
     };
+    if let Some(f) = &app.grid.filter {
+        let short: String = f.chars().take(24).collect();
+        let more = if f.chars().count() > 24 { "…" } else { "" };
+        title.push_str(&format!("  WHERE {short}{more}"));
+    }
     if let Some((ci, asc)) = app.grid.sort {
         if let Some(c) = app.grid.columns.get(ci) {
             title.push_str(&format!(
@@ -76,11 +85,10 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
     let selected_col = app.grid.selected_col;
 
     let header = Row::new(
-        app.grid
-            .columns
+        visible
             .iter()
-            .enumerate()
-            .map(|(i, c)| {
+            .map(|&i| {
+                let c = &app.grid.columns[i];
                 let text = match app.grid.sort {
                     Some((ci, true)) if ci == i => format!("{c} ↑"),
                     Some((ci, false)) if ci == i => format!("{c} ↓"),
@@ -100,13 +108,13 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let mut table_rows: Vec<Row> = Vec::new();
     for (ri, row) in app.grid.rows.iter().enumerate() {
-        let cells: Vec<Cell> = row
+        let cells: Vec<Cell> = visible
             .iter()
-            .enumerate()
-            .map(|(ci, cell)| {
+            .map(|&ci| {
+                let cell = row.get(ci);
                 let (text, base_style) = match cell {
-                    Some(v) => (v.clone(), Style::default()),
-                    None => (
+                    Some(Some(v)) => (v.clone(), Style::default()),
+                    _ => (
                         "NULL".to_string(),
                         Style::default()
                             .fg(Color::DarkGray)
@@ -126,18 +134,16 @@ pub fn draw_grid(frame: &mut Frame, app: &mut App, area: Rect) {
         table_rows.push(Row::new(cells));
     }
 
-    let widths: Vec<Constraint> = app
-        .grid
-        .col_widths
+    let widths: Vec<Constraint> = visible
         .iter()
-        .map(|&w| Constraint::Length(w as u16))
+        .map(|&i| Constraint::Length(app.grid.col_widths[i] as u16))
         .collect();
 
     let mut x = area.x + 1;
     let mut starts: Vec<u16> = Vec::new();
-    for &w in &app.grid.col_widths {
+    for &i in &visible {
         starts.push(x);
-        x += w as u16 + 1;
+        x += app.grid.col_widths[i] as u16 + 1;
     }
     starts.push(x);
     app.grid_col_starts = starts;
@@ -159,8 +165,15 @@ fn draw_focus_mode(frame: &mut Frame, app: &mut App, area: Rect, border_color: C
 
     let mut lines: Vec<Line> = Vec::new();
     let mut header_at: Vec<usize> = Vec::new();
+    let mut visible_sel_pos: Option<usize> = None;
 
     for (ci, col) in app.grid.columns.iter().enumerate() {
+        if app.grid.hidden(ci) {
+            continue;
+        }
+        if ci == sel_col {
+            visible_sel_pos = Some(header_at.len());
+        }
         header_at.push(lines.len());
         let header_style = if ci == sel_col {
             Style::default()
@@ -192,7 +205,19 @@ fn draw_focus_mode(frame: &mut Frame, app: &mut App, area: Rect, border_color: C
         lines.push(Line::from(""));
     }
 
-    let target = header_at.get(sel_col).copied().unwrap_or(0);
+    let target = visible_sel_pos
+        .and_then(|pos| header_at.get(pos).copied())
+        .unwrap_or(0);
+    let target = header_at.last().map(|_| target).unwrap_or(0);
+    let visible_headers: Vec<usize> = header_at;
+    let target = visible_headers
+        .iter()
+        .position(|&h| {
+            false
+        })
+        .map(|_| 0usize)
+        .unwrap_or(0);
+
     if target < app.focus_scroll {
         app.focus_scroll = target;
     }
