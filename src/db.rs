@@ -1,5 +1,5 @@
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
-use sqlx::{Column, Executor, PgPool, Row};
+use sqlx::{Column, Executor, PgPool, Row, TypeInfo, ValueRef};
 
 use crate::config::ConnectionProfile;
 
@@ -64,6 +64,115 @@ pub struct Metadata {
     pub indexes: TablePage,
 }
 
+/// Convert any Postgres column value to an `Option<String>` for display purposes.
+/// Handles NULL and all common types by inspecting the type name and decoding accordingly.
+fn pg_value_to_string(row: &sqlx::postgres::PgRow, idx: usize) -> Option<String> {
+    use sqlx::Row;
+
+    // Check for NULL first via raw value ref
+    let raw = row.try_get_raw(idx).ok()?;
+    if raw.is_null() {
+        return None;
+    }
+
+    let type_name = raw.type_info().name().to_uppercase();
+
+    // Try direct String / TEXT types
+    if matches!(
+        type_name.as_str(),
+        "TEXT" | "VARCHAR" | "BPCHAR" | "CHAR" | "NAME" | "CITEXT"
+    ) {
+        return row.try_get::<Option<String>, _>(idx).ok().flatten();
+    }
+
+    // Integers
+    if matches!(type_name.as_str(), "INT2" | "SMALLINT" | "SMALLSERIAL") {
+        return row.try_get::<Option<i16>, _>(idx).ok().flatten().map(|v| v.to_string());
+    }
+    if matches!(type_name.as_str(), "INT4" | "INT" | "INTEGER" | "SERIAL") {
+        return row.try_get::<Option<i32>, _>(idx).ok().flatten().map(|v| v.to_string());
+    }
+    if matches!(type_name.as_str(), "INT8" | "BIGINT" | "BIGSERIAL") {
+        return row.try_get::<Option<i64>, _>(idx).ok().flatten().map(|v| v.to_string());
+    }
+
+    // Floats
+    if matches!(type_name.as_str(), "FLOAT4" | "REAL") {
+        return row.try_get::<Option<f32>, _>(idx).ok().flatten().map(|v| v.to_string());
+    }
+    if matches!(type_name.as_str(), "FLOAT8" | "DOUBLE PRECISION") {
+        return row.try_get::<Option<f64>, _>(idx).ok().flatten().map(|v| v.to_string());
+    }
+
+    // Numeric / Decimal
+    if type_name == "NUMERIC" || type_name == "DECIMAL" {
+        return row
+            .try_get::<Option<sqlx::types::BigDecimal>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+
+    // Boolean
+    if type_name == "BOOL" || type_name == "BOOLEAN" {
+        return row.try_get::<Option<bool>, _>(idx).ok().flatten().map(|v| v.to_string());
+    }
+
+    // Date / Time
+    if type_name == "DATE" {
+        return row
+            .try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+    if matches!(type_name.as_str(), "TIME" | "TIMETZ") {
+        return row
+            .try_get::<Option<sqlx::types::chrono::NaiveTime>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+    if matches!(type_name.as_str(), "TIMESTAMP") {
+        return row
+            .try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+    if matches!(type_name.as_str(), "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE") {
+        return row
+            .try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+
+    // UUID
+    if type_name == "UUID" {
+        return row
+            .try_get::<Option<sqlx::types::Uuid>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+
+    // JSON / JSONB — decode as raw serde_json::Value
+    if matches!(type_name.as_str(), "JSON" | "JSONB") {
+        return row
+            .try_get::<Option<serde_json::Value>, _>(idx)
+            .ok()
+            .flatten()
+            .map(|v| v.to_string());
+    }
+
+    // Fallback: try String, then show type info
+    match row.try_get::<Option<String>, _>(idx) {
+        Ok(v) => v,
+        Err(_) => Some(format!("<{type_name}>")),
+    }
+}
+
 pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
     let result_rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
 
@@ -80,10 +189,7 @@ pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
         .iter()
         .map(|row| {
             (0..columns.len())
-                .map(|i| match row.try_get::<Option<String>, _>(i) {
-                    Ok(v) => v,
-                    Err(e) => Some(format!("«decode error: {e}»")),
-                })
+                .map(|i| pg_value_to_string(row, i))
                 .collect()
         })
         .collect();
