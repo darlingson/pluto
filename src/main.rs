@@ -130,9 +130,11 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
 
     match app.screen {
         Screen::Profiles => match key.code {
-            KeyCode::Char('j') | KeyCode::Down => app.next_profile(),
-            KeyCode::Char('k') | KeyCode::Up => app.prev_profile(),
+            KeyCode::Char('j') | KeyCode::Down => { app.profile_info_open = false; app.next_profile() }
+            KeyCode::Char('k') | KeyCode::Up => { app.profile_info_open = false; app.prev_profile() }
             KeyCode::Enter => app.connect_selected(),
+            KeyCode::Char('i') => app.profile_info_open = !app.profile_info_open,
+            KeyCode::Esc => app.profile_info_open = false,
             KeyCode::Char('d') => app.delete_selected_profile(),
             KeyCode::Char('q') => app.quit(),
             KeyCode::Char('c') if ctrl => app.quit(),

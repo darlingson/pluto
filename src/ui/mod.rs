@@ -44,7 +44,7 @@ fn draw_profiles(frame: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = app
         .profiles
         .iter()
-        .map(|p| ListItem::new(format!("{}   ({}/{})", p.name, p.host, p.database)))
+        .map(|p| ListItem::new(p.name.clone()))
         .collect();
 
     let list = List::new(items)
@@ -57,6 +57,44 @@ fn draw_profiles(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_symbol("> ");
 
     frame.render_stateful_widget(list, area, &mut app.profile_list);
+
+    if app.profile_info_open {
+        if let Some(p) = app.profiles.get(app.profile_list.selected().unwrap_or(0)) {
+            draw_profile_info(frame, p);
+        }
+    }
+}
+
+fn draw_profile_info(frame: &mut Frame, p: &crate::config::ConnectionProfile) {
+    use ratatui::text::Text;
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("  host      ", Style::default().fg(Color::DarkGray)),
+            Span::raw(format!("{}:{}", p.host, p.port)),
+        ]),
+        Line::from(vec![
+            Span::styled("  user      ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&p.user),
+        ]),
+        Line::from(vec![
+            Span::styled("  database  ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&p.database),
+        ]),
+        Line::from(vec![
+            Span::styled("  ssl       ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&p.ssl_mode),
+        ]),
+    ];
+
+    let popup_area = centered_rect(40, 30, frame.area());
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", p.name))
+        .border_style(Style::default().fg(Color::Yellow));
+    let para = Paragraph::new(Text::from(lines)).block(block);
+    frame.render_widget(para, popup_area);
 }
 
 fn draw_main(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -270,7 +308,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         "Ctrl+R: run  |  Esc: cancel  |  ↑/↓: history"
     } else {
         match app.screen {
-            Screen::Profiles => "↑/↓: select  |  Enter: connect  |  d: delete  |  q: quit",
+            Screen::Profiles => "↑/↓: select  |  i: info  |  Enter: connect  |  d: delete  |  q: quit",
             Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  m: meta  |  s: sort  |  w: filter  |  e: CSV  |  </>: width  |  x: hide  |  0: reset  |  q: quit",
         }
     };

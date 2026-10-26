@@ -207,6 +207,7 @@ pub struct App {
 
     pub profiles: Vec<ConnectionProfile>,
     pub profile_list: ListState,
+    pub profile_info_open: bool,
     pub connecting: bool,
 
     pub focus: Focus,
@@ -258,6 +259,7 @@ impl App {
             status,
             profiles,
             profile_list,
+            profile_info_open: false,
             connecting: false,
             focus: Focus::Sidebar,
             sidebar: Sidebar::new(),
