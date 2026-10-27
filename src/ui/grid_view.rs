@@ -205,17 +205,9 @@ fn draw_focus_mode(frame: &mut Frame, app: &mut App, area: Rect, border_color: C
         lines.push(Line::from(""));
     }
 
+    // keep the selected field's header in view
     let target = visible_sel_pos
         .and_then(|pos| header_at.get(pos).copied())
-        .unwrap_or(0);
-    let target = header_at.last().map(|_| target).unwrap_or(0);
-    let visible_headers: Vec<usize> = header_at;
-    let target = visible_headers
-        .iter()
-        .position(|&h| {
-            false
-        })
-        .map(|_| 0usize)
         .unwrap_or(0);
 
     if target < app.focus_scroll {

@@ -690,81 +690,98 @@ impl App {
     }
 
     pub fn builder_activate(&mut self) {
-        let Some(b) = &mut self.join_builder else { return };
-
-        // confirm manual target table
-        if b.target_pick.is_some() {
-            let ts = b.target_pick.take().unwrap();
-            b.target = ts.items.get(ts.selected).cloned();
-            b.pairs.clear();
-            b.selected = 0;
-            drop(b);
-            self.fetch_join_columns();
-            return;
+        enum Next {
+            Stay,
+            Fetch,
+            Run,
         }
 
-        // confirm a column in a pair pick
-        if b.picking.is_some() {
-            let p = b.picking.take().unwrap();
-            let name = match p.side {
-                JoinSide::Base => b.base_cols.get(p.sel).map(|(n, _)| n.clone()),
-                JoinSide::Target => b.target_cols.get(p.sel).map(|(n, _)| n.clone()),
-            };
-            let Some(name) = name else { return };
-            match p.side {
-                JoinSide::Base => {
-                    b.picking = Some(PickPair {
-                        replace: p.replace,
-                        side: JoinSide::Target,
-                        chosen: Some(name),
-                        sel: 0,
-                    });
-                }
-                JoinSide::Target => {
-                    let base_col = p.chosen.unwrap_or_default();
-                    if let Some(i) = p.replace {
-                        if let Some(pair) = b.pairs.get_mut(i) {
-                            *pair = (base_col, name);
+        // all state changes happen inside this block so the join_builder
+        // borrow is released before fetch_join_columns/run_join execute
+        let next = {
+            let Some(b) = &mut self.join_builder else { return };
+
+            // confirm manual target table
+            if b.target_pick.is_some() {
+                let ts = b.target_pick.take().unwrap();
+                b.target = ts.items.get(ts.selected).cloned();
+                b.pairs.clear();
+                b.selected = 0;
+                Next::Fetch
+            } else if let Some(p) = b.picking.take() {
+                // confirm a column in a pair pick
+                let name = match p.side {
+                    JoinSide::Base => b.base_cols.get(p.sel).map(|(n, _)| n.clone()),
+                    JoinSide::Target => b.target_cols.get(p.sel).map(|(n, _)| n.clone()),
+                };
+                if let Some(name) = name {
+                    match p.side {
+                        JoinSide::Base => {
+                            b.picking = Some(PickPair {
+                                replace: p.replace,
+                                side: JoinSide::Target,
+                                chosen: Some(name),
+                                sel: 0,
+                            });
                         }
-                    } else {
-                        b.pairs.push((base_col, name));
+                        JoinSide::Target => {
+                            let base_col = p.chosen.unwrap_or_default();
+                            if let Some(i) = p.replace {
+                                if let Some(pair) = b.pairs.get_mut(i) {
+                                    *pair = (base_col, name);
+                                }
+                            } else {
+                                b.pairs.push((base_col, name));
+                            }
+                            b.clamp();
+                            self.status = "join pair updated".to_string();
+                        }
                     }
-                    b.clamp();
-                    self.status = "join pair updated".to_string();
+                }
+                Next::Stay
+            } else {
+                if b.loading {
+                    self.status = "loading columns…".to_string();
+                    return;
+                }
+                let row = b.rows().get(b.selected).copied();
+                match row {
+                    Some(BuildRow::Pair(i)) => {
+                        b.picking = Some(PickPair {
+                            replace: Some(i),
+                            side: JoinSide::Base,
+                            chosen: None,
+                            sel: 0,
+                        });
+                        Next::Stay
+                    }
+                    Some(BuildRow::AddPair) => {
+                        b.picking = Some(PickPair {
+                            replace: None,
+                            side: JoinSide::Base,
+                            chosen: None,
+                            sel: 0,
+                        });
+                        Next::Stay
+                    }
+                    Some(BuildRow::BaseCol(i)) => {
+                        b.base_cols[i].1 = !b.base_cols[i].1;
+                        Next::Stay
+                    }
+                    Some(BuildRow::TargetCol(i)) => {
+                        b.target_cols[i].1 = !b.target_cols[i].1;
+                        Next::Stay
+                    }
+                    Some(BuildRow::Run) => Next::Run,
+                    None => Next::Stay,
                 }
             }
-            return;
-        }
+        };
 
-        if b.loading {
-            self.status = "loading columns…".to_string();
-            return;
-        }
-        let row = b.rows().get(b.selected).copied();
-        match row {
-            Some(BuildRow::Pair(i)) => {
-                b.picking = Some(PickPair {
-                    replace: Some(i),
-                    side: JoinSide::Base,
-                    chosen: None,
-                    sel: 0,
-                });
-            }
-            Some(BuildRow::AddPair) => {
-                b.picking = Some(PickPair {
-                    replace: None,
-                    side: JoinSide::Base,
-                    chosen: None,
-                    sel: 0,
-                });
-            }
-            Some(BuildRow::BaseCol(i)) => b.base_cols[i].1 = !b.base_cols[i].1,
-            Some(BuildRow::TargetCol(i)) => b.target_cols[i].1 = !b.target_cols[i].1,
-            Some(BuildRow::Run) => {
-                drop(b);
-                self.run_join();
-            }
-            None => {}
+        match next {
+            Next::Fetch => self.fetch_join_columns(),
+            Next::Run => self.run_join(),
+            Next::Stay => {}
         }
     }
 

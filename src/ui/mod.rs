@@ -421,7 +421,7 @@ fn draw_join_builder(frame: &mut Frame, app: &App) {
     let rows = b.rows();
     let mut items: Vec<ListItem> = Vec::new();
 
-    let mut push_header = |text: &str, items: &mut Vec<ListItem>| {
+    let push_header = |text: &str, items: &mut Vec<ListItem>| {
         items.push(ListItem::new(Span::styled(
             text.to_string(),
             Style::default().fg(Color::DarkGray),
