@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Focus, Screen};
+use crate::app::{App, BuildRow, Focus, JoinSide, Screen};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let root = Layout::default()
@@ -29,6 +29,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     if app.join_picker.is_some() {
         draw_join_picker(frame, app);
+    }
+    if app.join_builder.is_some() {
+        draw_join_builder(frame, app);
     }
 }
 
@@ -276,18 +279,19 @@ fn draw_join_picker(frame: &mut Frame, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(format!(
-            " join {}.{} — j/k select · Enter join · Esc close ",
+            " join {}.{} — j/k select · Enter configure · Esc close ",
             picker.base.0, picker.base.1
         ))
         .border_style(Style::default().fg(Color::Yellow));
 
-    if picker.joins.is_empty() {
+    if picker.joins.is_empty() && !picker.loaded {
         let p = Paragraph::new(" looking for foreign keys… ").block(block);
         frame.render_widget(p, area);
         return;
     }
 
-    let items: Vec<ListItem> = picker
+    let manual_idx = picker.joins.len();
+    let mut items: Vec<ListItem> = picker
         .joins
         .iter()
         .enumerate()
@@ -316,9 +320,186 @@ fn draw_join_picker(frame: &mut Frame, app: &App) {
             }
         })
         .collect();
+    items.push(if manual_idx == picker.selected {
+        ListItem::new(Span::styled(
+            "> + any table…",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        ListItem::new(Span::styled(
+            "  + any table…",
+            Style::default().fg(Color::DarkGray),
+        ))
+    });
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
+}
+
+fn draw_join_builder(frame: &mut Frame, app: &App) {
+    let Some(b) = &app.join_builder else {
+        return;
+    };
+    let area = centered_rect(75, 65, frame.area());
+    frame.render_widget(Clear, area);
+
+    let sel_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+
+    // manual join: choose the target table first
+    if let Some(ts) = &b.target_pick {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(
+                " join {}.{} — pick a table — j/k · Enter · Esc cancel ",
+                b.base.0, b.base.1
+            ))
+            .border_style(Style::default().fg(Color::Yellow));
+        let items: Vec<ListItem> = ts
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, (s, t))| {
+                let text = format!("{s}.{t}");
+                if i == ts.selected {
+                    ListItem::new(Span::styled(format!("> {text}"), sel_style))
+                } else {
+                    ListItem::new(format!("  {text}"))
+                }
+            })
+            .collect();
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    let title = if let Some(p) = &b.picking {
+        match p.side {
+            JoinSide::Base => " join builder — pick column from base table (1/2) — Esc cancel ".to_string(),
+            JoinSide::Target => " join builder — pick column from joined table (2/2) — Esc cancel ".to_string(),
+        }
+    } else {
+        match &b.target {
+            Some(t) => format!(
+                " join builder — {}.{} ⋈ {}.{} ",
+                b.base.0, b.base.1, t.0, t.1
+            ),
+            None => " join builder ".to_string(),
+        }
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    if b.loading && b.base_cols.is_empty() && b.target_cols.is_empty() {
+        let p = Paragraph::new(" loading columns… ").block(block);
+        frame.render_widget(p, area);
+        return;
+    }
+
+    // picking a column for a pair
+    if let Some(p) = &b.picking {
+        let (cols, alias) = match p.side {
+            JoinSide::Base => (&b.base_cols, "b"),
+            JoinSide::Target => (&b.target_cols, "t"),
+        };
+        let items: Vec<ListItem> = cols
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| {
+                let text = format!("{alias}.\"{name}\"");
+                if i == p.sel {
+                    ListItem::new(Span::styled(format!("> {text}"), sel_style))
+                } else {
+                    ListItem::new(format!("  {text}"))
+                }
+            })
+            .collect();
+        frame.render_widget(List::new(items).block(block), area);
+        return;
+    }
+
+    let rows = b.rows();
+    let mut items: Vec<ListItem> = Vec::new();
+
+    let mut push_header = |text: &str, items: &mut Vec<ListItem>| {
+        items.push(ListItem::new(Span::styled(
+            text.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    };
+    push_header(" join on ", &mut items);
+
+    for (ri, row) in rows.iter().enumerate() {
+        let first_col = matches!(row, BuildRow::BaseCol(0))
+            || (matches!(row, BuildRow::TargetCol(0)) && b.base_cols.is_empty());
+        if first_col && (!b.base_cols.is_empty() || !b.target_cols.is_empty()) {
+            push_header(" columns ", &mut items);
+        }
+
+        let selected = ri == b.selected;
+        let prefix = if selected { "> " } else { "  " };
+        let line = match row {
+            BuildRow::Pair(i) => {
+                let (a, c) = &b.pairs[*i];
+                Line::from(Span::styled(
+                    format!("{prefix}ON  b.\"{a}\" = t.\"{c}\""),
+                    if selected {
+                        sel_style
+                    } else {
+                        Style::default().fg(Color::Cyan)
+                    },
+                ))
+            }
+            BuildRow::AddPair => Line::from(Span::styled(
+                format!("{prefix}+ add join column pair…"),
+                if selected {
+                    sel_style
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            )),
+            BuildRow::BaseCol(i) | BuildRow::TargetCol(i) => {
+                let (cols, alias) = match row {
+                    BuildRow::BaseCol(_) => (&b.base_cols, "b"),
+                    _ => (&b.target_cols, "t"),
+                };
+                let (name, on) = &cols[*i];
+                Line::from(vec![
+                    Span::styled(
+                        format!("{prefix}{}", if *on { "[x] " } else { "[ ] " }),
+                        if *on {
+                            Style::default().fg(Color::Green)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                    Span::styled(
+                        format!("{alias}.\"{name}\""),
+                        if selected {
+                            sel_style
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                ])
+            }
+            BuildRow::Run => {
+                let nb = b.base_cols.iter().filter(|c| c.1).count();
+                let nt = b.target_cols.iter().filter(|c| c.1).count();
+                Line::from(Span::styled(
+                    format!("{prefix}→ run join · {} cols · {} pairs", nb + nt, b.pairs.len()),
+                    if selected {
+                        sel_style
+                    } else {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    },
+                ))
+            }
+        };
+        items.push(ListItem::new(line));
+    }
+
+    frame.render_widget(List::new(items).block(block), area);
 }
 
 pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
@@ -364,6 +545,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         "j/k: scroll  |  Ctrl+d/u: ½ page  |  gg/G: ends  |  Esc: close"
     } else if app.editor.visible {
         "Ctrl+R: run  |  Esc: cancel  |  ↑/↓: history"
+    } else if app.join_builder.is_some() {
+        "j/k: move  |  space: toggle column  |  Enter: pick/edit  |  d: remove pair  |  r: run  |  Esc: back"
+    } else if app.join_picker.is_some() {
+        "j/k: select  |  Enter: configure  |  Esc: close"
     } else {
         match app.screen {
             Screen::Profiles => "↑/↓: select  |  i: info  |  Enter: connect  |  d: delete  |  q: quit",

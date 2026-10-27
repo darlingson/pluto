@@ -40,6 +40,13 @@ pub enum DbEvent {
         joins: Vec<JoinInfo>,
     },
     JoinsFailed(String),
+    JoinColumnsLoaded {
+        base: (String, String),
+        target: (String, String),
+        base_cols: Vec<String>,
+        target_cols: Vec<String>,
+    },
+    JoinColumnsFailed(String),
 }
 
 #[derive(Debug)]
@@ -88,6 +95,86 @@ pub struct JoinPicker {
     pub base: (String, String),
     pub joins: Vec<JoinInfo>,
     pub selected: usize,
+    pub loaded: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinSide {
+    Base,
+    Target,
+}
+
+#[derive(Debug)]
+pub struct PickPair {
+    pub replace: Option<usize>,
+    pub side: JoinSide,
+    pub chosen: Option<String>,
+    pub sel: usize,
+}
+
+#[derive(Debug)]
+pub struct TableSelect {
+    pub items: Vec<(String, String)>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildRow {
+    Pair(usize),
+    AddPair,
+    BaseCol(usize),
+    TargetCol(usize),
+    Run,
+}
+
+#[derive(Debug)]
+pub struct JoinBuilder {
+    pub base: (String, String),
+    pub target: Option<(String, String)>,
+    pub pairs: Vec<(String, String)>,
+    pub base_cols: Vec<(String, bool)>,
+    pub target_cols: Vec<(String, bool)>,
+    pub loading: bool,
+    pub selected: usize,
+    pub picking: Option<PickPair>,
+    pub target_pick: Option<TableSelect>,
+}
+
+impl JoinBuilder {
+    pub fn new(base: (String, String)) -> Self {
+        Self {
+            base,
+            target: None,
+            pairs: Vec::new(),
+            base_cols: Vec::new(),
+            target_cols: Vec::new(),
+            loading: false,
+            selected: 0,
+            picking: None,
+            target_pick: None,
+        }
+    }
+
+    pub fn rows(&self) -> Vec<BuildRow> {
+        let mut rows = Vec::new();
+        for i in 0..self.pairs.len() {
+            rows.push(BuildRow::Pair(i));
+        }
+        rows.push(BuildRow::AddPair);
+        for i in 0..self.base_cols.len() {
+            rows.push(BuildRow::BaseCol(i));
+        }
+        for i in 0..self.target_cols.len() {
+            rows.push(BuildRow::TargetCol(i));
+        }
+        rows.push(BuildRow::Run);
+        rows
+    }
+
+    fn clamp(&mut self) {
+        let n = self.rows().len();
+        self.selected = if n == 0 { 0 } else { self.selected.min(n - 1) };
+    }
 }
 
 #[derive(Debug)]
@@ -247,6 +334,7 @@ pub struct App {
     pub metadata: Option<(String, Metadata)>,
 
     pub join_picker: Option<JoinPicker>,
+    pub join_builder: Option<JoinBuilder>,
 
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
@@ -296,6 +384,7 @@ impl App {
             loading_metadata: false,
             metadata: None,
             join_picker: None,
+            join_builder: None,
             tx,
             rx,
         }
@@ -402,6 +491,7 @@ impl App {
             base: base.clone(),
             joins: Vec::new(),
             selected: 0,
+            loaded: false,
         });
         self.status = "looking for foreign keys…".to_string();
         let tx = self.tx.clone();
@@ -416,21 +506,19 @@ impl App {
 
     pub fn join_picker_next(&mut self) {
         if let Some(p) = &mut self.join_picker {
-            if !p.joins.is_empty() {
-                p.selected = (p.selected + 1) % p.joins.len();
-            }
+            let len = p.joins.len() + 1; // +1 = "+ any table…" row
+            p.selected = (p.selected + 1) % len;
         }
     }
 
     pub fn join_picker_prev(&mut self) {
         if let Some(p) = &mut self.join_picker {
-            if !p.joins.is_empty() {
-                p.selected = if p.selected == 0 {
-                    p.joins.len() - 1
-                } else {
-                    p.selected - 1
-                };
-            }
+            let len = p.joins.len() + 1;
+            p.selected = if p.selected == 0 {
+                len - 1
+            } else {
+                p.selected - 1
+            };
         }
     }
 
@@ -438,12 +526,284 @@ impl App {
         let Some(picker) = &self.join_picker else {
             return;
         };
+        let base = picker.base.clone();
+
+        // last row: "+ any table…" — manual join, no FK needed
+        if picker.selected >= picker.joins.len() {
+            let mut items: Vec<(String, String)> = Vec::new();
+            for s in &self.schemas {
+                for t in &s.tables {
+                    items.push((s.name.clone(), t.clone()));
+                }
+            }
+            let mut builder = JoinBuilder::new(base);
+            builder.target_pick = Some(TableSelect { items, selected: 0 });
+            self.join_builder = Some(builder);
+            self.status = "pick a table to join…".to_string();
+            return;
+        }
+
         let Some(join) = picker.joins.get(picker.selected).cloned() else {
             return;
         };
-        let (bs, bt) = picker.base.clone();
-        let sql = db::build_join_query(&bs, &bt, &join);
-        let label = format!("{bs}.{bt} ⋈ {}.{}", join.schema, join.table);
+        // normalize pairs to (base_col, target_col)
+        let pairs: Vec<(String, String)> = if join.outgoing {
+            join.pairs.clone()
+        } else {
+            join.pairs
+                .iter()
+                .map(|(a, b)| (b.clone(), a.clone()))
+                .collect()
+        };
+        let target = (join.schema.clone(), join.table.clone());
+        self.open_join_builder(base, target, pairs);
+    }
+
+    fn open_join_builder(
+        &mut self,
+        base: (String, String),
+        target: (String, String),
+        pairs: Vec<(String, String)>,
+    ) {
+        let mut builder = JoinBuilder::new(base);
+        builder.target = Some(target);
+        builder.pairs = pairs;
+        self.join_builder = Some(builder);
+        self.fetch_join_columns();
+    }
+
+    fn fetch_join_columns(&mut self) {
+        let Some(b) = &self.join_builder else { return };
+        let base = b.base.clone();
+        let Some(target) = b.target.clone() else {
+            return;
+        };
+        let Some(pool) = self.pool.clone() else { return };
+        if let Some(b) = &mut self.join_builder {
+            b.loading = true;
+        }
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let res = async {
+                let base_cols = db::table_columns(&pool, &base.0, &base.1).await?;
+                let target_cols = db::table_columns(&pool, &target.0, &target.1).await?;
+                Ok::<_, anyhow::Error>((base_cols, target_cols))
+            }
+            .await;
+            let event = match res {
+                Ok((base_cols, target_cols)) => DbEvent::JoinColumnsLoaded {
+                    base,
+                    target,
+                    base_cols,
+                    target_cols,
+                },
+                Err(e) => DbEvent::JoinColumnsFailed(e.to_string()),
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    pub fn builder_back(&mut self) {
+        let Some(b) = &mut self.join_builder else { return };
+        if b.picking.is_some() {
+            b.picking = None;
+            return;
+        }
+        self.join_builder = None;
+    }
+
+    pub fn builder_next(&mut self) {
+        let Some(b) = &mut self.join_builder else { return };
+        if let Some(t) = &mut b.target_pick {
+            if !t.items.is_empty() {
+                t.selected = (t.selected + 1) % t.items.len();
+            }
+            return;
+        }
+        if let Some(p) = &mut b.picking {
+            let len = match p.side {
+                JoinSide::Base => b.base_cols.len(),
+                JoinSide::Target => b.target_cols.len(),
+            };
+            if len > 0 {
+                p.sel = (p.sel + 1) % len;
+            }
+            return;
+        }
+        let n = b.rows().len();
+        if n > 0 {
+            b.selected = (b.selected + 1).min(n - 1);
+        }
+    }
+
+    pub fn builder_prev(&mut self) {
+        let Some(b) = &mut self.join_builder else { return };
+        if let Some(t) = &mut b.target_pick {
+            if !t.items.is_empty() {
+                t.selected = if t.selected == 0 {
+                    t.items.len() - 1
+                } else {
+                    t.selected - 1
+                };
+            }
+            return;
+        }
+        if let Some(p) = &mut b.picking {
+            let len = match p.side {
+                JoinSide::Base => b.base_cols.len(),
+                JoinSide::Target => b.target_cols.len(),
+            };
+            if len > 0 {
+                p.sel = if p.sel == 0 { len - 1 } else { p.sel - 1 };
+            }
+            return;
+        }
+        if b.selected > 0 {
+            b.selected -= 1;
+        }
+    }
+
+    pub fn builder_toggle_col(&mut self) {
+        let Some(b) = &mut self.join_builder else { return };
+        if b.target_pick.is_some() || b.picking.is_some() {
+            return;
+        }
+        let row = b.rows().get(b.selected).copied();
+        match row {
+            Some(BuildRow::BaseCol(i)) => b.base_cols[i].1 = !b.base_cols[i].1,
+            Some(BuildRow::TargetCol(i)) => b.target_cols[i].1 = !b.target_cols[i].1,
+            _ => {}
+        }
+    }
+
+    pub fn builder_delete_pair(&mut self) {
+        let Some(b) = &mut self.join_builder else { return };
+        if b.target_pick.is_some() || b.picking.is_some() {
+            return;
+        }
+        let row = b.rows().get(b.selected).copied();
+        if let Some(BuildRow::Pair(i)) = row {
+            b.pairs.remove(i);
+            b.clamp();
+            self.status = "join pair removed".to_string();
+        }
+    }
+
+    pub fn builder_activate(&mut self) {
+        let Some(b) = &mut self.join_builder else { return };
+
+        // confirm manual target table
+        if b.target_pick.is_some() {
+            let ts = b.target_pick.take().unwrap();
+            b.target = ts.items.get(ts.selected).cloned();
+            b.pairs.clear();
+            b.selected = 0;
+            drop(b);
+            self.fetch_join_columns();
+            return;
+        }
+
+        // confirm a column in a pair pick
+        if b.picking.is_some() {
+            let p = b.picking.take().unwrap();
+            let name = match p.side {
+                JoinSide::Base => b.base_cols.get(p.sel).map(|(n, _)| n.clone()),
+                JoinSide::Target => b.target_cols.get(p.sel).map(|(n, _)| n.clone()),
+            };
+            let Some(name) = name else { return };
+            match p.side {
+                JoinSide::Base => {
+                    b.picking = Some(PickPair {
+                        replace: p.replace,
+                        side: JoinSide::Target,
+                        chosen: Some(name),
+                        sel: 0,
+                    });
+                }
+                JoinSide::Target => {
+                    let base_col = p.chosen.unwrap_or_default();
+                    if let Some(i) = p.replace {
+                        if let Some(pair) = b.pairs.get_mut(i) {
+                            *pair = (base_col, name);
+                        }
+                    } else {
+                        b.pairs.push((base_col, name));
+                    }
+                    b.clamp();
+                    self.status = "join pair updated".to_string();
+                }
+            }
+            return;
+        }
+
+        if b.loading {
+            self.status = "loading columns…".to_string();
+            return;
+        }
+        let row = b.rows().get(b.selected).copied();
+        match row {
+            Some(BuildRow::Pair(i)) => {
+                b.picking = Some(PickPair {
+                    replace: Some(i),
+                    side: JoinSide::Base,
+                    chosen: None,
+                    sel: 0,
+                });
+            }
+            Some(BuildRow::AddPair) => {
+                b.picking = Some(PickPair {
+                    replace: None,
+                    side: JoinSide::Base,
+                    chosen: None,
+                    sel: 0,
+                });
+            }
+            Some(BuildRow::BaseCol(i)) => b.base_cols[i].1 = !b.base_cols[i].1,
+            Some(BuildRow::TargetCol(i)) => b.target_cols[i].1 = !b.target_cols[i].1,
+            Some(BuildRow::Run) => {
+                drop(b);
+                self.run_join();
+            }
+            None => {}
+        }
+    }
+
+    pub fn run_join(&mut self) {
+        let Some(b) = &self.join_builder else { return };
+        if b.picking.is_some() || b.target_pick.is_some() {
+            return;
+        }
+        let Some(target) = b.target.clone() else {
+            self.status = "pick a table to join first".to_string();
+            return;
+        };
+        if b.pairs.is_empty() {
+            self.status = "add at least one join column pair".to_string();
+            return;
+        }
+        if b.pairs.iter().any(|(a, c)| a.is_empty() || c.is_empty()) {
+            self.status = "join pair has an empty column".to_string();
+            return;
+        }
+        let base_cols: Vec<String> = b
+            .base_cols
+            .iter()
+            .filter(|c| c.1)
+            .map(|c| c.0.clone())
+            .collect();
+        let target_cols: Vec<String> = b
+            .target_cols
+            .iter()
+            .filter(|c| c.1)
+            .map(|c| c.0.clone())
+            .collect();
+        if base_cols.is_empty() && target_cols.is_empty() {
+            self.status = "include at least one column".to_string();
+            return;
+        }
+        let sql = db::build_join_query(&b.base, &target, &base_cols, &target_cols, &b.pairs);
+        let label = format!("{}.{} ⋈ {}.{}", b.base.0, b.base.1, target.0, target.1);
+        self.join_builder = None;
         self.join_picker = None;
         self.execute_query(sql, label);
     }
@@ -792,13 +1152,14 @@ impl App {
             DbEvent::JoinsLoaded { base, joins } => {
                 if let Some(p) = &mut self.join_picker {
                     if p.base == base {
-                        if joins.is_empty() {
-                            self.status =
-                                format!("no foreign keys found on {}.{}", base.0, base.1);
-                            self.join_picker = None;
-                        } else {
-                            p.joins = joins;
-                            p.selected = 0;
+                        p.loaded = true;
+                        p.joins = joins;
+                        p.selected = 0;
+                        if p.joins.is_empty() {
+                            self.status = format!(
+                                "no foreign keys on {}.{} — pick any table to join",
+                                base.0, base.1
+                            );
                         }
                     }
                 }
@@ -806,6 +1167,27 @@ impl App {
             DbEvent::JoinsFailed(msg) => {
                 self.join_picker = None;
                 self.status = format!("join lookup failed: {msg}");
+            }
+            DbEvent::JoinColumnsLoaded {
+                base,
+                target,
+                base_cols,
+                target_cols,
+            } => {
+                if let Some(b) = &mut self.join_builder {
+                    if b.base == base && b.target.as_ref() == Some(&target) {
+                        b.base_cols = base_cols.into_iter().map(|c| (c, true)).collect();
+                        b.target_cols = target_cols.into_iter().map(|c| (c, true)).collect();
+                        b.loading = false;
+                        b.selected = 0;
+                        b.clamp();
+                        self.status = "configure the join — space toggles columns, r runs".to_string();
+                    }
+                }
+            }
+            DbEvent::JoinColumnsFailed(msg) => {
+                self.join_builder = None;
+                self.status = format!("join builder failed: {msg}");
             }
         }
     }

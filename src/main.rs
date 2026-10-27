@@ -125,6 +125,10 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         handle_viewer_key(app, key);
         return;
     }
+    if app.screen == Screen::Main && app.join_builder.is_some() {
+        handle_join_builder_key(app, key);
+        return;
+    }
     if app.screen == Screen::Main && app.join_picker.is_some() {
         handle_join_key(app, key);
         return;
@@ -212,6 +216,19 @@ fn handle_editor_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Home => app.editor.move_home(),
         KeyCode::End => app.editor.move_end(),
         KeyCode::Char(c) if !ctrl => app.editor.insert_char(c),
+        _ => {}
+    }
+}
+
+fn handle_join_builder_key(app: &mut App, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.builder_back(),
+        KeyCode::Char('j') | KeyCode::Down => app.builder_next(),
+        KeyCode::Char('k') | KeyCode::Up => app.builder_prev(),
+        KeyCode::Char(' ') => app.builder_toggle_col(),
+        KeyCode::Char('d') => app.builder_delete_pair(),
+        KeyCode::Char('r') => app.run_join(),
+        KeyCode::Enter => app.builder_activate(),
         _ => {}
     }
 }

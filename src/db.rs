@@ -281,20 +281,50 @@ pub async fn find_joins(
     Ok(joins)
 }
 
-pub fn build_join_query(base_schema: &str, base_table: &str, join: &JoinInfo) -> String {
-    let base = quote_ident(base_schema, base_table);
-    let target = quote_ident(&join.schema, &join.table);
-    let on = join
-        .pairs
+pub async fn table_columns(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+) -> anyhow::Result<Vec<String>> {
+    let sql = format!(
+        "SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = {} AND table_name = {}
+         ORDER BY ordinal_position",
+        quote_literal(schema),
+        quote_literal(table),
+    );
+    let page = run_query(pool, &sql).await?;
+    Ok(page
+        .rows
         .iter()
-        .map(|(a, b)| {
-            if join.outgoing {
-                format!("b.{} = t.{}", quote_col(a), quote_col(b))
-            } else {
-                format!("t.{} = b.{}", quote_col(a), quote_col(b))
-            }
-        })
+        .filter_map(|r| r.first().and_then(|c| c.clone()))
+        .collect())
+}
+
+pub fn build_join_query(
+    base: &(String, String),
+    target: &(String, String),
+    base_cols: &[String],
+    target_cols: &[String],
+    pairs: &[(String, String)],
+) -> String {
+    let mut select: Vec<String> = base_cols
+        .iter()
+        .map(|c| format!("b.{}", quote_col(c)))
+        .collect();
+    select.extend(target_cols.iter().map(|c| format!("t.{}", quote_col(c))));
+    let select = if select.is_empty() {
+        "*".to_string()
+    } else {
+        select.join(", ")
+    };
+    let on = pairs
+        .iter()
+        .map(|(a, b)| format!("b.{} = t.{}", quote_col(a), quote_col(b)))
         .collect::<Vec<_>>()
         .join(" AND ");
-    format!("SELECT b.*, t.* FROM {base} b JOIN {target} t ON {on}")
+    let base = quote_ident(&base.0, &base.1);
+    let target = quote_ident(&target.0, &target.1);
+    format!("SELECT {select} FROM {base} b JOIN {target} t ON {on}")
 }
