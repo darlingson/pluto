@@ -1,4 +1,4 @@
-use sqlx::postgres::{PgConnectOptions, PgSslMode};
+use sqlx::postgres::{PgConnectOptions, PgRow, PgSslMode};
 use sqlx::{Column, Executor, PgPool, Row, TypeInfo, ValueRef};
 
 use crate::config::ConnectionProfile;
@@ -64,119 +64,10 @@ pub struct Metadata {
     pub indexes: TablePage,
 }
 
-/// Convert any Postgres column value to an `Option<String>` for display purposes.
-/// Handles NULL and all common types by inspecting the type name and decoding accordingly.
-fn pg_value_to_string(row: &sqlx::postgres::PgRow, idx: usize) -> Option<String> {
-    use sqlx::Row;
-
-    // Check for NULL first via raw value ref
-    let raw = row.try_get_raw(idx).ok()?;
-    if raw.is_null() {
-        return None;
-    }
-
-    let type_name = raw.type_info().name().to_uppercase();
-
-    // Try direct String / TEXT types
-    if matches!(
-        type_name.as_str(),
-        "TEXT" | "VARCHAR" | "BPCHAR" | "CHAR" | "NAME" | "CITEXT"
-    ) {
-        return row.try_get::<Option<String>, _>(idx).ok().flatten();
-    }
-
-    // Integers
-    if matches!(type_name.as_str(), "INT2" | "SMALLINT" | "SMALLSERIAL") {
-        return row.try_get::<Option<i16>, _>(idx).ok().flatten().map(|v| v.to_string());
-    }
-    if matches!(type_name.as_str(), "INT4" | "INT" | "INTEGER" | "SERIAL") {
-        return row.try_get::<Option<i32>, _>(idx).ok().flatten().map(|v| v.to_string());
-    }
-    if matches!(type_name.as_str(), "INT8" | "BIGINT" | "BIGSERIAL") {
-        return row.try_get::<Option<i64>, _>(idx).ok().flatten().map(|v| v.to_string());
-    }
-
-    // Floats
-    if matches!(type_name.as_str(), "FLOAT4" | "REAL") {
-        return row.try_get::<Option<f32>, _>(idx).ok().flatten().map(|v| v.to_string());
-    }
-    if matches!(type_name.as_str(), "FLOAT8" | "DOUBLE PRECISION") {
-        return row.try_get::<Option<f64>, _>(idx).ok().flatten().map(|v| v.to_string());
-    }
-
-    // Numeric / Decimal
-    if type_name == "NUMERIC" || type_name == "DECIMAL" {
-        return row
-            .try_get::<Option<sqlx::types::BigDecimal>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-
-    // Boolean
-    if type_name == "BOOL" || type_name == "BOOLEAN" {
-        return row.try_get::<Option<bool>, _>(idx).ok().flatten().map(|v| v.to_string());
-    }
-
-    // Date / Time
-    if type_name == "DATE" {
-        return row
-            .try_get::<Option<sqlx::types::chrono::NaiveDate>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-    if matches!(type_name.as_str(), "TIME" | "TIMETZ") {
-        return row
-            .try_get::<Option<sqlx::types::chrono::NaiveTime>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-    if matches!(type_name.as_str(), "TIMESTAMP") {
-        return row
-            .try_get::<Option<sqlx::types::chrono::NaiveDateTime>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-    if matches!(type_name.as_str(), "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE") {
-        return row
-            .try_get::<Option<sqlx::types::chrono::DateTime<sqlx::types::chrono::Utc>>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-
-    // UUID
-    if type_name == "UUID" {
-        return row
-            .try_get::<Option<sqlx::types::Uuid>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-
-    // JSON / JSONB — decode as raw serde_json::Value
-    if matches!(type_name.as_str(), "JSON" | "JSONB") {
-        return row
-            .try_get::<Option<serde_json::Value>, _>(idx)
-            .ok()
-            .flatten()
-            .map(|v| v.to_string());
-    }
-
-    // Fallback: try String, then show type info
-    match row.try_get::<Option<String>, _>(idx) {
-        Ok(v) => v,
-        Err(_) => Some(format!("<{type_name}>")),
-    }
-}
-
 pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
     let result_rows = sqlx::raw_sql(sql).fetch_all(pool).await?;
 
-    let columns: Vec<String> = if let Some(first) = result_rows.first() {
+    let mut columns: Vec<String> = if let Some(first) = result_rows.first() {
         first.columns().iter().map(|c| c.name().to_string()).collect()
     } else {
         match pool.describe(sql).await {
@@ -185,11 +76,21 @@ pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
         }
     };
 
+    // dedupe column names (e.g. SELECT b.*, t.* gives two "Id"s)
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for c in &mut columns {
+        let n = seen.entry(c.clone()).or_insert(0);
+        if *n > 0 {
+            *c = format!("{c}_{}", *n + 1);
+        }
+        *n += 1;
+    }
+
     let rows: Vec<Vec<Option<String>>> = result_rows
         .iter()
         .map(|row| {
             (0..columns.len())
-                .map(|i| pg_value_to_string(row, i))
+                .map(|i| decode_cell(row, i))
                 .collect()
         })
         .collect();
@@ -200,6 +101,27 @@ pub async fn run_query(pool: &PgPool, sql: &str) -> anyhow::Result<TablePage> {
         rows,
         total_rows,
     })
+}
+
+// raw_sql runs on the simple protocol, so Postgres returns every value in
+// text format on the wire. Reading the raw value side-steps sqlx's
+// type-compatibility check and renders any column type (int4, bool,
+// timestamptz, arrays, ...) the way psql would show it.
+fn decode_cell(row: &PgRow, i: usize) -> Option<String> {
+    match row.try_get_raw(i) {
+        Ok(raw) => {
+            if raw.is_null() {
+                None
+            } else {
+                match raw.as_str() {
+                    Ok(s) => Some(s.to_owned()),
+                    // only reachable in binary format, which raw_sql never uses
+                    Err(_) => Some(format!("«{}»", raw.type_info().name())),
+                }
+            }
+        }
+        Err(e) => Some(format!("«decode error: {e}»")),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -267,4 +189,112 @@ pub async fn load_metadata(pool: &PgPool, schema: &str, table: &str) -> anyhow::
     let indexes = run_query(pool, &idx_sql).await?;
 
     Ok(Metadata { columns, indexes })
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinInfo {
+    pub outgoing: bool,
+    pub schema: String,
+    pub table: String,
+    pub pairs: Vec<(String, String)>,
+}
+
+pub async fn find_joins(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+) -> anyhow::Result<Vec<JoinInfo>> {
+    let s = quote_literal(schema);
+    let t = quote_literal(table);
+
+    let fk_sql = |base_is_source: bool| {
+        let filter = if base_is_source {
+            format!("ns.nspname = {s} AND cls.relname = {t}")
+        } else {
+            format!("ns_ref.nspname = {s} AND cls_ref.relname = {t}")
+        };
+        format!(
+            "SELECT con.conname AS cname,
+                    ns.nspname AS child_schema, cls.relname AS child_table,
+                    ns_ref.nspname AS ref_schema, cls_ref.relname AS ref_table,
+                    col_from.attname AS from_col, col_to.attname AS to_col
+             FROM pg_constraint con
+             JOIN pg_class cls ON cls.oid = con.conrelid
+             JOIN pg_namespace ns ON ns.oid = cls.relnamespace
+             JOIN pg_class cls_ref ON cls_ref.oid = con.confrelid
+             JOIN pg_namespace ns_ref ON ns_ref.oid = cls_ref.relnamespace
+             JOIN unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) ON TRUE
+             JOIN unnest(con.confkey) WITH ORDINALITY AS r(attnum, ord) ON r.ord = k.ord
+             JOIN pg_attribute col_from ON col_from.attrelid = cls.oid AND col_from.attnum = k.attnum
+             JOIN pg_attribute col_to ON col_to.attrelid = cls_ref.oid AND col_to.attnum = r.attnum
+             WHERE con.contype = 'f'
+               AND con.conrelid <> con.confrelid
+               AND {filter}
+             ORDER BY con.conname, k.ord"
+        )
+    };
+
+    let mut joins: Vec<JoinInfo> = Vec::new();
+
+    // outgoing: base (child side) references other tables
+    let outgoing = run_query(pool, &fk_sql(true)).await?;
+    for row in &outgoing.rows {
+        let get = |i: usize| row.get(i).and_then(|c| c.clone()).unwrap_or_default();
+        let (schema, table) = (get(3), get(4)); // ref side
+        let pair = (get(5), get(6));
+        if let Some(j) = joins
+            .iter_mut()
+            .find(|j| j.outgoing && j.schema == schema && j.table == table)
+        {
+            j.pairs.push(pair);
+        } else {
+            joins.push(JoinInfo {
+                outgoing: true,
+                schema,
+                table,
+                pairs: vec![pair],
+            });
+        }
+    }
+
+    // incoming: other tables (child side) reference base
+    let incoming = run_query(pool, &fk_sql(false)).await?;
+    for row in &incoming.rows {
+        let get = |i: usize| row.get(i).and_then(|c| c.clone()).unwrap_or_default();
+        let (schema, table) = (get(1), get(2)); // child side
+        let pair = (get(5), get(6));
+        if let Some(j) = joins
+            .iter_mut()
+            .find(|j| !j.outgoing && j.schema == schema && j.table == table)
+        {
+            j.pairs.push(pair);
+        } else {
+            joins.push(JoinInfo {
+                outgoing: false,
+                schema,
+                table,
+                pairs: vec![pair],
+            });
+        }
+    }
+
+    Ok(joins)
+}
+
+pub fn build_join_query(base_schema: &str, base_table: &str, join: &JoinInfo) -> String {
+    let base = quote_ident(base_schema, base_table);
+    let target = quote_ident(&join.schema, &join.table);
+    let on = join
+        .pairs
+        .iter()
+        .map(|(a, b)| {
+            if join.outgoing {
+                format!("b.{} = t.{}", quote_col(a), quote_col(b))
+            } else {
+                format!("t.{} = b.{}", quote_col(a), quote_col(b))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("SELECT b.*, t.* FROM {base} b JOIN {target} t ON {on}")
 }

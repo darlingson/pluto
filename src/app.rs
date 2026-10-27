@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::config::{self, ConnectionProfile};
-use crate::db::{self, Metadata};
+use crate::db::{self, JoinInfo, Metadata};
 use crate::grid::{Grid, PAGE_SIZE};
 use crate::input::Editor;
 
@@ -35,6 +35,11 @@ pub enum DbEvent {
     TableQueryFailed(String),
     MetadataLoaded { label: String, meta: Metadata },
     MetadataFailed(String),
+    JoinsLoaded {
+        base: (String, String),
+        joins: Vec<JoinInfo>,
+    },
+    JoinsFailed(String),
 }
 
 #[derive(Debug)]
@@ -76,6 +81,13 @@ impl Viewer {
     pub fn close(&mut self) {
         self.visible = false;
     }
+}
+
+#[derive(Debug)]
+pub struct JoinPicker {
+    pub base: (String, String),
+    pub joins: Vec<JoinInfo>,
+    pub selected: usize,
 }
 
 #[derive(Debug)]
@@ -234,6 +246,8 @@ pub struct App {
     pub loading_metadata: bool,
     pub metadata: Option<(String, Metadata)>,
 
+    pub join_picker: Option<JoinPicker>,
+
     pub tx: UnboundedSender<DbEvent>,
     pub rx: UnboundedReceiver<DbEvent>,
 }
@@ -281,6 +295,7 @@ impl App {
             metadata_open: false,
             loading_metadata: false,
             metadata: None,
+            join_picker: None,
             tx,
             rx,
         }
@@ -374,6 +389,91 @@ impl App {
         let content = cell.clone().unwrap_or_else(|| "(NULL)".to_string());
         let title = format!("{} — row {} — {}", self.grid.label, row + 1, col_name);
         self.viewer.open(title, content);
+    }
+
+    pub fn open_join_picker(&mut self) {
+        if !self.grid.paged || self.current_table.is_none() {
+            self.status = "open a table first".to_string();
+            return;
+        }
+        let base = self.current_table.clone().unwrap();
+        let Some(pool) = self.pool.clone() else { return };
+        self.join_picker = Some(JoinPicker {
+            base: base.clone(),
+            joins: Vec::new(),
+            selected: 0,
+        });
+        self.status = "looking for foreign keys…".to_string();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let event = match db::find_joins(&pool, &base.0, &base.1).await {
+                Ok(joins) => DbEvent::JoinsLoaded { base, joins },
+                Err(e) => DbEvent::JoinsFailed(e.to_string()),
+            };
+            let _ = tx.send(event);
+        });
+    }
+
+    pub fn join_picker_next(&mut self) {
+        if let Some(p) = &mut self.join_picker {
+            if !p.joins.is_empty() {
+                p.selected = (p.selected + 1) % p.joins.len();
+            }
+        }
+    }
+
+    pub fn join_picker_prev(&mut self) {
+        if let Some(p) = &mut self.join_picker {
+            if !p.joins.is_empty() {
+                p.selected = if p.selected == 0 {
+                    p.joins.len() - 1
+                } else {
+                    p.selected - 1
+                };
+            }
+        }
+    }
+
+    pub fn select_join(&mut self) {
+        let Some(picker) = &self.join_picker else {
+            return;
+        };
+        let Some(join) = picker.joins.get(picker.selected).cloned() else {
+            return;
+        };
+        let (bs, bt) = picker.base.clone();
+        let sql = db::build_join_query(&bs, &bt, &join);
+        let label = format!("{bs}.{bt} ⋈ {}.{}", join.schema, join.table);
+        self.join_picker = None;
+        self.execute_query(sql, label);
+    }
+
+    fn execute_query(&mut self, sql: String, label: String) {
+        let Some(pool) = self.pool.clone() else { return };
+        self.focus = Focus::Main;
+        self.focus_mode = false;
+        self.grid.sort = None;
+        self.grid.filter = None;
+        self.metadata_open = false;
+        self.current_table = None;
+        self.grid.loading = true;
+        self.grid.paged = false;
+        self.grid.page = 0;
+        self.grid.label = label;
+        self.status = "running query…".to_string();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let event = match db::run_query(&pool, &sql).await {
+                Ok(p) => DbEvent::TablePageLoaded {
+                    columns: p.columns,
+                    rows: p.rows,
+                    total: p.total_rows,
+                    page: 0,
+                },
+                Err(e) => DbEvent::TableQueryFailed(e.to_string()),
+            };
+            let _ = tx.send(event);
+        });
     }
 
     pub fn export_csv(&mut self) {
@@ -610,37 +710,8 @@ impl App {
         self.editor.push_history(text.clone());
         let _ = config::save_history(&self.editor.history);
 
-        let Some(pool) = self.pool.clone() else { return };
-        self.focus = Focus::Main;
-        self.focus_mode = false;
-        self.grid.sort = None;
-        self.grid.filter = None;
-        self.metadata_open = false;
-        self.current_table = None;
-        self.grid.loading = true;
-        self.grid.paged = false;
-        self.grid.page = 0;
-        self.grid.label = if text.chars().count() > 60 {
-            let mut s: String = text.chars().take(57).collect();
-            s.push('…');
-            s
-        } else {
-            text.clone()
-        };
-        self.status = "running query…".to_string();
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let event = match db::run_query(&pool, &text).await {
-                Ok(p) => DbEvent::TablePageLoaded {
-                    columns: p.columns,
-                    rows: p.rows,
-                    total: p.total_rows,
-                    page: 0,
-                },
-                Err(e) => DbEvent::TableQueryFailed(e.to_string()),
-            };
-            let _ = tx.send(event);
-        });
+        let label = truncate_label(&text);
+        self.execute_query(text, label);
     }
 
     pub fn handle_db_event(&mut self, event: DbEvent) {
@@ -718,7 +789,35 @@ impl App {
                 self.metadata_open = false;
                 self.status = format!("metadata failed: {msg}");
             }
+            DbEvent::JoinsLoaded { base, joins } => {
+                if let Some(p) = &mut self.join_picker {
+                    if p.base == base {
+                        if joins.is_empty() {
+                            self.status =
+                                format!("no foreign keys found on {}.{}", base.0, base.1);
+                            self.join_picker = None;
+                        } else {
+                            p.joins = joins;
+                            p.selected = 0;
+                        }
+                    }
+                }
+            }
+            DbEvent::JoinsFailed(msg) => {
+                self.join_picker = None;
+                self.status = format!("join lookup failed: {msg}");
+            }
         }
+    }
+}
+
+fn truncate_label(sql: &str) -> String {
+    if sql.chars().count() > 60 {
+        let mut s: String = sql.chars().take(57).collect();
+        s.push('…');
+        s
+    } else {
+        sql.to_string()
     }
 }
 

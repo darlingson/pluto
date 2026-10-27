@@ -27,6 +27,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.viewer.visible {
         draw_viewer(frame, app);
     }
+    if app.join_picker.is_some() {
+        draw_join_picker(frame, app);
+    }
 }
 
 fn draw_profiles(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -263,6 +266,61 @@ fn draw_viewer(frame: &mut Frame, app: &mut App) {
     frame.render_widget(paragraph, area);
 }
 
+fn draw_join_picker(frame: &mut Frame, app: &App) {
+    let Some(picker) = &app.join_picker else {
+        return;
+    };
+    let area = centered_rect(70, 50, frame.area());
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(
+            " join {}.{} — j/k select · Enter join · Esc close ",
+            picker.base.0, picker.base.1
+        ))
+        .border_style(Style::default().fg(Color::Yellow));
+
+    if picker.joins.is_empty() {
+        let p = Paragraph::new(" looking for foreign keys… ").block(block);
+        frame.render_widget(p, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = picker
+        .joins
+        .iter()
+        .enumerate()
+        .map(|(i, j)| {
+            let arrow = if j.outgoing { "→" } else { "←" };
+            let on = j
+                .pairs
+                .iter()
+                .map(|(a, b)| {
+                    if j.outgoing {
+                        format!("b.\"{a}\" = t.\"{b}\"")
+                    } else {
+                        format!("t.\"{a}\" = b.\"{b}\"")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            let text = format!("{arrow} {}.{}   ON {}", j.schema, j.table, on);
+            if i == picker.selected {
+                ListItem::new(Span::styled(
+                    format!("> {text}"),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ))
+            } else {
+                ListItem::new(format!("  {text}"))
+            }
+        })
+        .collect();
+
+    let list = List::new(items).block(block);
+    frame.render_widget(list, area);
+}
+
 pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -309,7 +367,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         match app.screen {
             Screen::Profiles => "↑/↓: select  |  i: info  |  Enter: connect  |  d: delete  |  q: quit",
-            Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  m: meta  |  s: sort  |  w: filter  |  e: CSV  |  </>: width  |  x: hide  |  0: reset  |  q: quit",
+            Screen::Main => "Tab: panes  |  Enter: cell  |  f: focus  |  i: query  |  m: meta  |  o: joins  |  s: sort  |  w: filter  |  e: CSV  |  </>: width  |  x: hide  |  0: reset  |  q: quit",
         }
     };
     let status_color = if app.status.starts_with("connection failed")

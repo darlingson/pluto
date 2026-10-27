@@ -125,6 +125,10 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
         handle_viewer_key(app, key);
         return;
     }
+    if app.screen == Screen::Main && app.join_picker.is_some() {
+        handle_join_key(app, key);
+        return;
+    }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -147,6 +151,7 @@ fn handle_key(app: &mut App, key: event::KeyEvent) {
             KeyCode::Char('i') => app.open_editor(),
             KeyCode::Char('w') => app.open_filter_editor(),
             KeyCode::Char('m') => app.toggle_metadata(),
+            KeyCode::Char('o') => app.open_join_picker(),
             KeyCode::Char('f') => app.toggle_focus_mode(),
             KeyCode::Esc => app.focus_mode = false,
             _ if app.focus == Focus::Sidebar => match key.code {
@@ -207,6 +212,16 @@ fn handle_editor_key(app: &mut App, key: event::KeyEvent) {
         KeyCode::Home => app.editor.move_home(),
         KeyCode::End => app.editor.move_end(),
         KeyCode::Char(c) if !ctrl => app.editor.insert_char(c),
+        _ => {}
+    }
+}
+
+fn handle_join_key(app: &mut App, key: event::KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.join_picker = None,
+        KeyCode::Char('j') | KeyCode::Down => app.join_picker_next(),
+        KeyCode::Char('k') | KeyCode::Up => app.join_picker_prev(),
+        KeyCode::Enter => app.select_join(),
         _ => {}
     }
 }
